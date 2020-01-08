@@ -2,6 +2,11 @@
 #include "../headers/cfs.h"
 
 int main(int argc, char const *argv[]) {
-    /* code */
+    // Check for correct usage
+    if (argc != 1) {
+        printf("Usage:cfs_pwd\n");
+        return 0;
+    }
+    // TODO: Implementation
     return 0;
 }
