@@ -3,22 +3,10 @@
 
 #include <time.h>
 
-#define DATABLOCK_NUM 1000
+typedef struct cfs *CFS;
 
-typedef struct {
-    unsigned  int  datablocks[DATABLOCK_NUM];
-} Datastream;
-
-typedef struct {
-    unsigned int nodeid;
-    char *filename;
-    unsigned int size;
-    unsigned int type;
-    unsigned int parent_nodeid;
-    time_t creation_time;
-    time_t accessTime;
-    time_t modificationTime;
-    Datastream data;
-} MDS;
+int CFS_Init(CFS*);
+int CFS_Run(CFS);
+int CFS_Destroy(CFS*);
 
 #endif

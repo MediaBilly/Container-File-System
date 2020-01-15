@@ -1,14 +1,20 @@
 CC = gcc
 FLAGS = -Wall
-SOURCES = $(wildcard ./src/*.c)
-EXECUTABLES = $(SOURCES:./src/%.c=%)
+TARGETS = src/main.o src/cfs.o src/utilities.o
 
-all:$(EXECUTABLES)
+cfs:$(TARGETS)
+	$(CC) $(FLAGS) -o cfs $(TARGETS)
 
-%:./src/%.c
-	$(CC) $(FLAGS) -o $@ $<
+src/main.o:src/main.c
+	$(CC) $(FLAGS) -o src/main.o -c src/main.c
+
+src/cfs.o:src/cfs.c
+	$(CC) $(FLAGS) -o src/cfs.o -c src/cfs.c
+
+src/utilities.o:src/utilities.c
+	$(CC) $(FLAGS) -o src/utilities.o -c src/utilities.c
 
 .PHONY : clean
 
 clean:
-	rm -f $(EXECUTABLES)
+	rm -f $(TARGETS)
