@@ -3,7 +3,7 @@
 
 typedef char* string;
 
-string readNextWord();
+string readNextWord(int*);
 void DestroyString(string*);
 
 #endif

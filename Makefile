@@ -17,4 +17,4 @@ src/utilities.o:src/utilities.c
 .PHONY : clean
 
 clean:
-	rm -f $(TARGETS)
+	rm -f $(TARGETS) *.cfs

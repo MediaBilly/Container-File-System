@@ -20,11 +20,14 @@
 // Other definitions
 #define NO_PARENT -1
 
+// CFS structure definition
 struct cfs {
-    int fileDesc;
-    char currentFile[MAX_FILENAME_SIZE];
+    int fileDesc; // File descriptor of currently working cfs file
+    char currentFile[MAX_FILENAME_SIZE]; // Name of currently working cfs file
+    int currentDirectoryId; // Nodeid for current directory
 };
 
+// Superblock definition
 typedef struct {
     int BLOCK_SIZE;
     int FILENAME_SIZE;
@@ -32,10 +35,15 @@ typedef struct {
     int MAX_DIRECTORY_FILE_NUMBER;
 } superblock;
 
+// Datastream definition:
+// If entity is directory datablocks are the id's of the entities that the dir contains
+// If entity is shortcut datablocks contain the id of the entity that the shortcut connects to
+// If entity is file datablocks contain the file contents
 typedef struct {
-    unsigned int datablocks[DATABLOCK_NUM];
+    char datablocks[DATABLOCK_NUM];
 } Datastream;
 
+// Metadata structure definition
 typedef struct {
     unsigned int nodeid;
     char filename[MAX_FILENAME_SIZE];
@@ -56,6 +64,7 @@ int CFS_Init(CFS *cfs) {
     }
     // No initial current working file
     memset((*cfs)->currentFile,0,MAX_FILENAME_SIZE);
+    (*cfs)->fileDesc = -1;
     return 1;
 }
 
@@ -70,13 +79,17 @@ int Create_CFS_File(string pathname,int BLOCK_SIZE,int FILENAME_SIZE,int MAX_FIL
         // Write root node data
         MDS data;
         data.nodeid = 0;
-        strcpy(pathname,data.filename);
+        strcpy(data.filename,pathname);
         data.size = 0;
         data.type = TYPE_DIRECTORY;
         data.parent_nodeid = NO_PARENT;
         time_t timer = time(NULL);
         data.creation_time = data.accessTime = data.modificationTime = timer;
+        // Set datablocks to empty content
+        data.data.datablocks[0] = '\0';
         write(fd,&data,sizeof(MDS));
+        // Close the file after writing data
+        close(fd);
     } else {
         perror("Error creating cfs file:");
         return -1;
@@ -91,38 +104,48 @@ int CFS_Run(CFS cfs) {
     while (running) {
         printf("%s>",cfs->currentFile);
         // Read command label
-        commandLabel = readNextWord();
-        // Check if it was specified
-        if (strlen(commandLabel)) {
-            // Work with specific file
-            if (!strcmp("cfs_workwith",commandLabel)) {
+        int lastword;
+        commandLabel = readNextWord(&lastword);
+        // Work with specific file
+        if (!strcmp("cfs_workwith",commandLabel)) {
+            // Check if it was specified
+            if (!lastword) {
                 // Read filename
-                string file;
-                // Check if it was specified
-                if ((file = readNextWord()) != NULL) {
-                    // Check if file exists
-                    if ((cfs->fileDesc = open(file,O_RDWR,FILE_PERMISSIONS)) < 0) {
-                        printf("File %s does not exist\n",file);
-                    } else {
-                        // File exists so check if it is cfs format
-
-                        strcpy(cfs->currentFile,file);
-                    }
+                string file = readNextWord(&lastword);
+                // Check if file exists
+                if ((cfs->fileDesc = open(file,O_RDWR,FILE_PERMISSIONS)) < 0) {
+                    printf("File %s does not exist\n",file);
                 } else {
-                    printf("Usage:cfs_workwith <FILE>\n");
+                    // File exists so open it
+                    strcpy(cfs->currentFile,file);
+                    cfs->fileDesc = open(file,O_RDWR);
+                    // Set current directory to root (/)
+                    cfs->currentDirectoryId = 0;
                 }
+            } else {
+                // File not specified
+                printf("Usage:cfs_workwith <FILE>\n");
             }
-            // Create new cfs file
-            else if (!strcmp("cfs_create",commandLabel)) {
+        }
+        // Create new cfs file
+        else if (!strcmp("cfs_create",commandLabel)) {
+            // Check if options were specified
+            if (!lastword) {
                 // Read options
                 string option,option_argument;
                 // Read first option or file
-                option = readNextWord();
+                option = readNextWord(&lastword);
                 int ok = 1;
-                int BLOCK_SIZE = sizeof(unsigned int),FILENAME_SIZE = MAX_FILENAME_SIZE,MAX_FILE_SIZE = DATABLOCK_NUM,MAX_DIRECTORY_FILE_NUMBER = 50;
-                while (option != NULL && option[0] == '-') {
+                int BLOCK_SIZE = sizeof(char),FILENAME_SIZE = MAX_FILENAME_SIZE,MAX_FILE_SIZE = DATABLOCK_NUM,MAX_DIRECTORY_FILE_NUMBER = 50;
+                while (option[0] == '-') {
+                    // Check if option argument was not specified
+                    if (lastword) {
+                        ok = 0;
+                        break;
+                    }
                     // Read option argument
-                    if ((option_argument = readNextWord()) != NULL) {
+                    option_argument = readNextWord(&lastword);
+                    if (!lastword) {
                         // Handle each option flag
                         if (!strcmp("-bs",option)) {
                             // BLOCK_SIZE
@@ -145,9 +168,12 @@ int CFS_Run(CFS cfs) {
                             ok = 0;
                             break;
                         }
+                    } else {
+                        ok = 0;
+                        break;
                     }
                     // Read new option
-                    option = readNextWord();
+                    option = readNextWord(&lastword);
                 }
                 // No wrong usage of any command so continue on file creation
                 if (ok) {
@@ -155,11 +181,21 @@ int CFS_Run(CFS cfs) {
                     string file = option;
                     // Create the file
                     Create_CFS_File(file,BLOCK_SIZE,FILENAME_SIZE,MAX_FILE_SIZE,MAX_DIRECTORY_FILE_NUMBER);
+                } else {
+                    // No file specified
+                    printf("Usage:cfs_workwith <OPTIONS> <FILE>\n");
                 }
             } else {
-                printf("Wrong command.\n");
+                // No file specified
+                printf("Usage:cfs_workwith <OPTIONS> <FILE>\n");
             }
-        } 
+        }
+        // Exit cfs interface 
+        else if (!strcmp("cfs_exit",commandLabel)) {
+            running = 0;
+        } else {
+            printf("Wrong command.\n");
+        }
     }
     return 1;
 }

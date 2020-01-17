@@ -5,12 +5,10 @@
 
 #define BUFFER_SIZE 30
 
-string readNextWord() {
+string readNextWord(int *lastword) {
     // Ignore whitespace
     char ch = 0;
-    while (!feof(stdin) && ((ch = fgetc(stdin)) < 33 && ch != '\n'));
-    if (feof(stdin))
-        return NULL;
+    while (((ch = fgetc(stdin)) < 33 && ch != '\n'));
     ungetc(ch,stdin);
     char *buf;
     int curBufSize = sizeof(char) * BUFFER_SIZE;
@@ -19,7 +17,7 @@ string readNextWord() {
     }
     int i = 0;
     // Read word to dynamically allocated buffer letter by letter in order to avoid static array
-    while (!feof(stdin) && (ch = fgetc(stdin)) != '\n' && ch != ' ')
+    while ((ch = fgetc(stdin)) != '\n' && ch != ' ')
     {
         // Buffer full so allocate more space
         if (i == curBufSize) {
@@ -30,6 +28,7 @@ string readNextWord() {
         }
         buf[i++] = ch;
     }
+    *lastword = ch == '\n';
     // Buffer full so allocate 1 more byte for end of string character to fit
     if (i == curBufSize) {
         if ((buf = (string)realloc(buf,(1 + curBufSize) * sizeof(char))) == NULL) {
