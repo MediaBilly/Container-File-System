@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../headers/utilities.h"
+#include "../headers/string_functions.h"
 
 #define BUFFER_SIZE 30
 
@@ -51,4 +51,8 @@ void DestroyString(string *str) {
         free(*str);
         *str = NULL;
     }
+}
+
+void IgnoreRemainingInput() {
+    while (getchar() != '\n');
 }

@@ -4,6 +4,7 @@
 typedef char* string;
 
 string readNextWord(int*);
+void IgnoreRemainingInput();
 void DestroyString(string*);
 
 #endif

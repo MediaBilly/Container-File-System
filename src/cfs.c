@@ -5,7 +5,7 @@
 #include <unistd.h>
 #include <time.h>
 #include "../headers/cfs.h"
-#include "../headers/utilities.h"
+#include "../headers/string_functions.h"
 
 // File definitions
 #define DATABLOCK_NUM 1000
@@ -25,6 +25,7 @@ struct cfs {
     int fileDesc; // File descriptor of currently working cfs file
     char currentFile[MAX_FILENAME_SIZE]; // Name of currently working cfs file
     int currentDirectoryId; // Nodeid for current directory
+    string currentDirectory; // Absolute path for current directory (for cfs_pwd command)
 };
 
 // Superblock definition
@@ -45,6 +46,7 @@ typedef struct {
 
 // Metadata structure definition
 typedef struct {
+    char deleted;
     unsigned int nodeid;
     char filename[MAX_FILENAME_SIZE];
     unsigned int size;
@@ -56,6 +58,15 @@ typedef struct {
     Datastream data;
 } MDS;
 
+int DigitsCount(int num) {
+    int digits = 0;
+    while (num > 0) {
+        digits++;
+        num /= 10;
+    }
+    return digits;
+}
+
 int CFS_Init(CFS *cfs) {
     // Initialize cfs structure
     if ((*cfs = malloc(sizeof(struct cfs))) == NULL) {
@@ -65,29 +76,112 @@ int CFS_Init(CFS *cfs) {
     // No initial current working file
     memset((*cfs)->currentFile,0,MAX_FILENAME_SIZE);
     (*cfs)->fileDesc = -1;
+    (*cfs)->currentDirectory = NULL;
+    return 1;
+}
+
+unsigned int CFS_GetNextAvailableNodeId(int fileDesc) {
+    // Return the id of the 1st hole or last node id + 1 if no holes exist
+    // Seek to 1st node metadata
+    lseek(fileDesc,sizeof(superblock),SEEK_SET);
+    MDS data,tmpData;
+    // Continue reading node's metadata until a hole is found or we reach the end of the cfs file
+    while (read(fileDesc,&tmpData,sizeof(MDS)) != 0) {
+        data = tmpData;
+        // Hole found
+        if (data.deleted)
+            return data.nodeid;
+    }
+    // End of file reached so new node will be placed there
+    return data.nodeid + 1;
+}
+
+int CFS_CreateShortcut(int fileDesc,string name,unsigned int nodeid,unsigned int destNodeId) {
+    MDS data;
+    // Initialize metadata bytes to 0 to avoid valgrind errors
+    memset(&data,0,sizeof(MDS));
+    // Initialize shortcut metadata
+    data.deleted = 0;
+    data.nodeid = CFS_GetNextAvailableNodeId(fileDesc);
+    strcpy(data.filename,name);
+    data.size = DigitsCount(destNodeId);
+    data.type = TYPE_SHORTCUT;
+    data.parent_nodeid = nodeid;
+    time_t timer = time(NULL);
+    data.creation_time = data.accessTime = data.modificationTime = timer;
+    // Set datablocks data to destination nodeid
+    memcpy(data.data.datablocks,&destNodeId,sizeof(unsigned int));
+    // Write shortcut data to cfs file
+    write(fileDesc,&data,sizeof(MDS));
+    // Write directory descriptor to node's list
+    lseek(fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
+    MDS locationData;
+    read(fileDesc,&locationData,sizeof(MDS));
+    memcpy(locationData.data.datablocks + locationData.size,&data.nodeid,sizeof(int));
+    locationData.size += sizeof(int);
+    lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
+    write(fileDesc,&locationData,sizeof(MDS));
+    return 1;
+}
+
+int CFS_CreateDirectory(int fileDesc,string name,unsigned int nodeid) {
+    MDS data;
+    // Initialize metadata bytes to 0 to avoid valgrind errors
+    memset(&data,0,sizeof(MDS));
+    // Initialize shortcut metadata
+    data.deleted = 0;
+    data.nodeid = CFS_GetNextAvailableNodeId(fileDesc);
+    strcpy(data.filename,name);
+    data.size = 0;
+    data.type = TYPE_DIRECTORY;
+    data.parent_nodeid = nodeid;
+    time_t timer = time(NULL);
+    data.creation_time = data.accessTime = data.modificationTime = timer;
+    // Write directory data to cfs file
+    write(fileDesc,&data,sizeof(MDS));
+    // Write directory descriptor to node's list
+    lseek(fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
+    MDS locationData;
+    read(fileDesc,&locationData,sizeof(MDS));
+    memcpy(locationData.data.datablocks + locationData.size,&data.nodeid,sizeof(int));
+    locationData.size += sizeof(int);
+    lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
+    write(fileDesc,&locationData,sizeof(MDS));
+    // Create . shortcut
+    CFS_CreateShortcut(fileDesc,".",data.nodeid,data.nodeid);
+    // Create .. shortcut
+    CFS_CreateShortcut(fileDesc,"..",data.nodeid,nodeid);
     return 1;
 }
 
 int Create_CFS_File(string pathname,int BLOCK_SIZE,int FILENAME_SIZE,int MAX_FILE_SIZE,int MAX_DIRECTORY_FILE_NUMBER) {
     // Create the file
-    int fd = creat(pathname,FILE_PERMISSIONS);
+    int fd = open(pathname,O_RDWR|O_CREAT|O_TRUNC,FILE_PERMISSIONS);
     // Check if creation was successful
     if (fd != -1) {
         // Write superblock data
         superblock sb = {BLOCK_SIZE, FILENAME_SIZE, MAX_FILE_SIZE, MAX_DIRECTORY_FILE_NUMBER};
+        lseek(fd,0,SEEK_END);
         write(fd,&sb,sizeof(superblock));
         // Write root node data
         MDS data;
+        // Initialize metadata bytes to 0 to avoid valgrind errors
+        memset(&data,0,sizeof(MDS));
+        // Initialize root directory metadata
+        data.deleted = 0;
         data.nodeid = 0;
-        strcpy(data.filename,pathname);
+        strcpy(data.filename,"/");
         data.size = 0;
         data.type = TYPE_DIRECTORY;
         data.parent_nodeid = NO_PARENT;
         time_t timer = time(NULL);
         data.creation_time = data.accessTime = data.modificationTime = timer;
-        // Set datablocks to empty content
-        data.data.datablocks[0] = '\0';
+        lseek(fd,0,SEEK_END);
         write(fd,&data,sizeof(MDS));
+        // Create . shortcut
+        CFS_CreateShortcut(fd,".",0,0);
+        // Create .. shortcut
+        CFS_CreateShortcut(fd,"..",0,0);
         // Close the file after writing data
         close(fd);
     } else {
@@ -110,6 +204,10 @@ int CFS_Run(CFS cfs) {
         if (!strcmp("cfs_workwith",commandLabel)) {
             // Check if it was specified
             if (!lastword) {
+                // Close previous open cfs file if exists
+                if (cfs->fileDesc != -1) {
+                    close(cfs->fileDesc);
+                }
                 // Read filename
                 string file = readNextWord(&lastword);
                 // Check if file exists
@@ -118,13 +216,44 @@ int CFS_Run(CFS cfs) {
                 } else {
                     // File exists so open it
                     strcpy(cfs->currentFile,file);
-                    cfs->fileDesc = open(file,O_RDWR);
                     // Set current directory to root (/)
                     cfs->currentDirectoryId = 0;
+                    cfs->currentDirectory = (string)malloc(2*sizeof(char));
+                    strcpy(cfs->currentDirectory,"/");
                 }
+                DestroyString(&file);
             } else {
                 // File not specified
                 printf("Usage:cfs_workwith <FILE>\n");
+            }
+        }
+        // Create directory (or directories)
+        else if (!strcmp("cfs_mkdir",commandLabel)) {
+            if (cfs->fileDesc != -1) {
+                // Check if directories were specified
+                if (!lastword) {
+                    string dir;
+                    while (!lastword) {
+                        dir = readNextWord(&lastword);
+                        CFS_CreateDirectory(cfs->fileDesc,dir,cfs->currentDirectoryId);
+                        DestroyString(&dir);
+                    }
+                    DestroyString(&dir);
+                } else {
+                    printf("Usage:cfs_mkdir <DIRECTORIES>\n");
+                }
+            } else {
+                printf("Not currently working with a cfs file.\n");
+                if (!lastword)
+                    IgnoreRemainingInput();
+            }
+        }
+        // Print working directory (absolute path)
+        else if (!strcmp("cfs_pwd",commandLabel)) {
+            if (cfs->fileDesc != -1) {
+                printf("%s\n",cfs->currentDirectory);
+            } else {
+                printf("Not currently working with a cfsd file.\n");
             }
         }
         // Create new cfs file
@@ -173,6 +302,8 @@ int CFS_Run(CFS cfs) {
                         break;
                     }
                     // Read new option
+                    DestroyString(&option);
+                    DestroyString(&option_argument);
                     option = readNextWord(&lastword);
                 }
                 // No wrong usage of any command so continue on file creation
@@ -185,6 +316,7 @@ int CFS_Run(CFS cfs) {
                     // No file specified
                     printf("Usage:cfs_workwith <OPTIONS> <FILE>\n");
                 }
+                DestroyString(&option);
             } else {
                 // No file specified
                 printf("Usage:cfs_workwith <OPTIONS> <FILE>\n");
@@ -196,13 +328,20 @@ int CFS_Run(CFS cfs) {
         } else {
             printf("Wrong command.\n");
         }
+        DestroyString(&commandLabel);
     }
     return 1;
 }
 
 int CFS_Destroy(CFS *cfs) {
     if (*cfs != NULL) {
+        // Close open cfs file if exists
+        if ((*cfs)->fileDesc != -1) {
+            close((*cfs)->fileDesc);
+        }
         // Free allocated memory for cfs
+        if ((*cfs)->currentDirectory != NULL)
+            free((*cfs)->currentDirectory);
         free(*cfs);
         *cfs = NULL;
         return 1;
