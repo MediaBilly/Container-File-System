@@ -63,6 +63,7 @@ typedef struct {
     char valid;
     string filenanme;
     unsigned int nodeid;
+    unsigned int type;
 } location;
 
 int DigitsCount(int num) {
@@ -86,20 +87,20 @@ int CFS_Init(CFS *cfs) {
     return 1;
 }
 
-unsigned int getNodeIdFromName(int fileDesc,string name,unsigned int nodeid,int *found) {
-    *found = 0;
+unsigned int getNodeIdFromName(int fileDesc,string name,unsigned int nodeid,int *found,unsigned int *type) {
+    *found = 1;
     MDS data;
     // Seek to the current block metadata
     lseek(fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
     // Get it's metadata
     read(fileDesc,&data,sizeof(MDS));
     // Determine data type
-    printf("Searching for %s at node %u\n",name,nodeid);
     if (data.type == TYPE_DIRECTORY) {
         // Directory
         // Search all the entities until we find the id of the wanted one
         unsigned int i,curId;
         MDS tmpData;
+        *found = 0;
         for (i = 0; i < data.size/sizeof(int); i++) {
             // Get id of the current entity
             curId = *(unsigned int*)(data.data.datablocks + i*sizeof(int));
@@ -108,21 +109,22 @@ unsigned int getNodeIdFromName(int fileDesc,string name,unsigned int nodeid,int 
             // Get it's metadata
             read(fileDesc,&tmpData,sizeof(MDS));
             // Check if the name matches
-            printf("\t%s\n",tmpData.filename);
             if (!strcmp(name,tmpData.filename)) {
                 // Found
                 *found = 1;
+                // If wanted node is shortcut return the id and type of the pointed node
+                if (tmpData.type == TYPE_SHORTCUT) {
+                    // Get pointed node metadata
+                    lseek(fileDesc,sizeof(superblock) + *(unsigned int*)(tmpData.data.datablocks)*sizeof(MDS),SEEK_SET);
+                    read(fileDesc,&tmpData,sizeof(MDS));
+                    curId = tmpData.nodeid;
+                } 
+                *type = tmpData.type;
                 return curId;
             }
         }
-    } else if (data.type == TYPE_SHORTCUT) {
-        // Shortcut
-        // Simply return the shortcut's node id destination
-        *found = 1;
-        return *(unsigned int*)(data.data.datablocks);
     } 
-    // Not found
-    return 0;
+    return data.nodeid;
 }
 
 location getPathLocation(int fileDesc,string path,unsigned int nodeid,int ignoreLastEntity) {
@@ -134,8 +136,12 @@ location getPathLocation(int fileDesc,string path,unsigned int nodeid,int ignore
     }
     int found;
     location ret;
+    ret.nodeid = 0;
+    ret.filenanme = "/";
+    ret.type = TYPE_DIRECTORY;
+    ret.valid = 1;
     while (entityName != NULL){
-        nodeid = getNodeIdFromName(fileDesc,entityName,nodeid,&found);
+        nodeid = getNodeIdFromName(fileDesc,entityName,nodeid,&found,&ret.type);
         ret.filenanme = entityName;
         // Not found
         if (!found) {
@@ -195,8 +201,8 @@ int CFS_CreateShortcut(int fileDesc,string name,unsigned int nodeid,unsigned int
     lseek(fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
     MDS locationData;
     read(fileDesc,&locationData,sizeof(MDS));
-    memcpy(locationData.data.datablocks + locationData.size,&data.nodeid,sizeof(int));
-    locationData.size += sizeof(int);
+    memcpy(locationData.data.datablocks + locationData.size,&data.nodeid,sizeof(unsigned int));
+    locationData.size += sizeof(unsigned int);
     lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
     write(fileDesc,&locationData,sizeof(MDS));
     return 1;
@@ -319,17 +325,23 @@ int Create_CFS_File(string pathname,int BLOCK_SIZE,int FILENAME_SIZE,int MAX_FIL
     return fd;
 }
 
-void CFS_pwd(int fileDesc,unsigned int nodeid) {
+void CFS_pwd(int fileDesc,unsigned int nodeid,int last) {
     // Seek to current node's metadata in cfs file
     MDS data;
     lseek(fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
     // Read the metadata from the cfs file
     read(fileDesc,&data,sizeof(MDS));
     if (!data.root) {
-        CFS_pwd(fileDesc,data.parent_nodeid);
-        printf("/%s",data.filename);
+        CFS_pwd(fileDesc,data.parent_nodeid,0);
+        printf("%s",data.filename);
+        if (!last)
+            printf("/");
+        else
+            printf("\n");
     } else {
         printf("%s",data.filename);
+        if (last)
+            printf("\n");
     }
 }
 
@@ -468,11 +480,37 @@ int CFS_Run(CFS cfs) {
         // Print working directory (absolute path)
         else if (!strcmp("cfs_pwd",commandLabel)) {
             if (cfs->fileDesc != -1) {
-                CFS_pwd(cfs->fileDesc,cfs->currentDirectoryId);
+                CFS_pwd(cfs->fileDesc,cfs->currentDirectoryId,1);
             } else {
-                printf("Not currently working with a cfsd file.");
+                printf("Not currently working with a cfsd file.\n");
             }
-            printf("\n");
+        }
+        // Change directory
+        else if (!strcmp("cfs_cd",commandLabel)) {
+            // Check if path was specified
+            if (!lastword) {
+                string path = readNextWord(&lastword);
+                // Check for correct usage (no other parameters)
+                if (lastword) {
+                    // Correect usage so change working directory
+                    location newdir = getPathLocation(cfs->fileDesc,path,cfs->currentDirectoryId,0);
+                    if (newdir.valid) {
+                        if (newdir.type == TYPE_DIRECTORY) {
+                            cfs->currentDirectoryId = newdir.nodeid;
+                        } else {
+                            printf("Not a directory.\n");
+                        }
+                    } else {
+                        printf("No such file or directory.\n");
+                    }
+                } else {
+                    // Incorrect usage
+                    printf("Usage:cfs_cd <PATH>\n");
+                }
+            } else {
+                // Path not specified
+                printf("Usage:cfs_cd <PATH>\n");
+            }
         }
         // Create new cfs file
         else if (!strcmp("cfs_create",commandLabel)) {
