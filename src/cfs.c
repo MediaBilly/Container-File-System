@@ -17,15 +17,15 @@
 #define TYPE_DIRECTORY 1
 #define TYPE_SHORTCUT 2
 
-// Other definitions
-#define NO_PARENT -1
+// Define option flags
+#define TOUCH_ACCESS 0
+#define TOUCH_MODIFICATION 1
 
 // CFS structure definition
 struct cfs {
     int fileDesc; // File descriptor of currently working cfs file
     char currentFile[MAX_FILENAME_SIZE]; // Name of currently working cfs file
     int currentDirectoryId; // Nodeid for current directory
-    string currentDirectory; // Absolute path for current directory (for cfs_pwd command)
 };
 
 // Superblock definition
@@ -46,7 +46,8 @@ typedef struct {
 
 // Metadata structure definition
 typedef struct {
-    char deleted;
+    char deleted; // 1 if the entity was previously deleted and o otherwise
+    char root; // 1 if root node and 0 otherwise
     unsigned int nodeid;
     char filename[MAX_FILENAME_SIZE];
     unsigned int size;
@@ -57,6 +58,12 @@ typedef struct {
     time_t modificationTime;
     Datastream data;
 } MDS;
+
+typedef struct {
+    char valid;
+    string filenanme;
+    unsigned int nodeid;
+} location;
 
 int DigitsCount(int num) {
     int digits = 0;
@@ -76,8 +83,78 @@ int CFS_Init(CFS *cfs) {
     // No initial current working file
     memset((*cfs)->currentFile,0,MAX_FILENAME_SIZE);
     (*cfs)->fileDesc = -1;
-    (*cfs)->currentDirectory = NULL;
     return 1;
+}
+
+unsigned int getNodeIdFromName(int fileDesc,string name,unsigned int nodeid,int *found) {
+    *found = 0;
+    MDS data;
+    // Seek to the current block metadata
+    lseek(fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
+    // Get it's metadata
+    read(fileDesc,&data,sizeof(MDS));
+    // Determine data type
+    printf("Searching for %s at node %u\n",name,nodeid);
+    if (data.type == TYPE_DIRECTORY) {
+        // Directory
+        // Search all the entities until we find the id of the wanted one
+        unsigned int i,curId;
+        MDS tmpData;
+        for (i = 0; i < data.size/sizeof(int); i++) {
+            // Get id of the current entity
+            curId = *(unsigned int*)(data.data.datablocks + i*sizeof(int));
+            // Seek to the current entity metadata
+            lseek(fileDesc,sizeof(superblock) + curId * sizeof(MDS),SEEK_SET);
+            // Get it's metadata
+            read(fileDesc,&tmpData,sizeof(MDS));
+            // Check if the name matches
+            printf("\t%s\n",tmpData.filename);
+            if (!strcmp(name,tmpData.filename)) {
+                // Found
+                *found = 1;
+                return curId;
+            }
+        }
+    } else if (data.type == TYPE_SHORTCUT) {
+        // Shortcut
+        // Simply return the shortcut's node id destination
+        *found = 1;
+        return *(unsigned int*)(data.data.datablocks);
+    } 
+    // Not found
+    return 0;
+}
+
+location getPathLocation(int fileDesc,string path,unsigned int nodeid,int ignoreLastEntity) {
+    string entityName = strtok(path,"/");
+    // Determine path type
+    if (path[0] == '/') {
+        // Absolute path so start searching from the root
+        nodeid = 0;
+    }
+    int found;
+    location ret;
+    while (entityName != NULL){
+        nodeid = getNodeIdFromName(fileDesc,entityName,nodeid,&found);
+        ret.filenanme = entityName;
+        // Not found
+        if (!found) {
+            // Check if we reached the last entity and we want to ignore it (for mkdir,touch,cp,cat,ln,mv commands)
+            if (ignoreLastEntity && strtok(NULL,"/") == NULL) {
+                ret.nodeid = nodeid;
+                ret.valid = 1;
+            } else {
+                ret.valid = 0;
+                ret.nodeid = 0;
+            }
+            break;
+        } else {
+            ret.nodeid = nodeid;
+            ret.valid = 1;
+            entityName = strtok(NULL,"/");
+        }
+    }
+    return ret;
 }
 
 unsigned int CFS_GetNextAvailableNodeId(int fileDesc) {
@@ -102,6 +179,7 @@ int CFS_CreateShortcut(int fileDesc,string name,unsigned int nodeid,unsigned int
     memset(&data,0,sizeof(MDS));
     // Initialize shortcut metadata
     data.deleted = 0;
+    data.root = 0;
     data.nodeid = CFS_GetNextAvailableNodeId(fileDesc);
     strcpy(data.filename,name);
     data.size = DigitsCount(destNodeId);
@@ -130,6 +208,7 @@ int CFS_CreateDirectory(int fileDesc,string name,unsigned int nodeid) {
     memset(&data,0,sizeof(MDS));
     // Initialize shortcut metadata
     data.deleted = 0;
+    data.root = 0;
     data.nodeid = CFS_GetNextAvailableNodeId(fileDesc);
     strcpy(data.filename,name);
     data.size = 0;
@@ -154,6 +233,54 @@ int CFS_CreateDirectory(int fileDesc,string name,unsigned int nodeid) {
     return 1;
 }
 
+int CFS_CreateFile(int fileDesc,string name,unsigned int dirnodeid,string content) {
+    MDS data;
+    // Initialize metadata bytes to 0 to avoid valgrind errors
+    memset(&data,0,sizeof(MDS));
+    // Initialize shortcut metadata
+    data.deleted = 0;
+    data.root = 0;
+    data.nodeid = CFS_GetNextAvailableNodeId(fileDesc);
+    strcpy(data.filename,name);
+    data.size = 0;
+    data.type = TYPE_FILE;
+    data.parent_nodeid = dirnodeid;
+    time_t timer = time(NULL);
+    data.creation_time = data.accessTime = data.modificationTime = timer;
+    // Write content to datablocks
+    memcpy(data.data.datablocks,content,strlen(content) + 1);
+    // Write file data to cfs file
+    write(fileDesc,&data,sizeof(MDS));
+    // Write file descriptor to directory's node list
+    lseek(fileDesc,sizeof(superblock) + dirnodeid * sizeof(MDS),SEEK_SET);
+    MDS locationData;
+    read(fileDesc,&locationData,sizeof(MDS));
+    memcpy(locationData.data.datablocks + locationData.size,&data.nodeid,sizeof(int));
+    locationData.size += sizeof(int);
+    lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
+    write(fileDesc,&locationData,sizeof(MDS));
+    return 1;
+}
+
+int CFS_ModifyFileTimestamps(int fileDesc,unsigned int nodeid,int access,int modification) {
+    MDS data;
+    // Seek to file's metadata location in cfs file
+    lseek(fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
+    // Read file's metadata
+    read(fileDesc,&data,sizeof(MDS));
+    // Modify the timestamps
+    time_t timestamp = time(NULL);
+    if (access)
+        data.accessTime = timestamp;
+    if (modification)
+        data.modificationTime = timestamp;
+    // Seek again to file's metadata location in cfs file
+    lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
+    // Write changes to cfs file
+    write(fileDesc,&data,sizeof(MDS));
+    return 1;
+}
+
 int Create_CFS_File(string pathname,int BLOCK_SIZE,int FILENAME_SIZE,int MAX_FILE_SIZE,int MAX_DIRECTORY_FILE_NUMBER) {
     // Create the file
     int fd = open(pathname,O_RDWR|O_CREAT|O_TRUNC,FILE_PERMISSIONS);
@@ -169,11 +296,12 @@ int Create_CFS_File(string pathname,int BLOCK_SIZE,int FILENAME_SIZE,int MAX_FIL
         memset(&data,0,sizeof(MDS));
         // Initialize root directory metadata
         data.deleted = 0;
+        data.root = 1;
         data.nodeid = 0;
         strcpy(data.filename,"/");
         data.size = 0;
         data.type = TYPE_DIRECTORY;
-        data.parent_nodeid = NO_PARENT;
+        data.parent_nodeid = 0;
         time_t timer = time(NULL);
         data.creation_time = data.accessTime = data.modificationTime = timer;
         lseek(fd,0,SEEK_END);
@@ -189,6 +317,20 @@ int Create_CFS_File(string pathname,int BLOCK_SIZE,int FILENAME_SIZE,int MAX_FIL
         return -1;
     }
     return fd;
+}
+
+void CFS_pwd(int fileDesc,unsigned int nodeid) {
+    // Seek to current node's metadata in cfs file
+    MDS data;
+    lseek(fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
+    // Read the metadata from the cfs file
+    read(fileDesc,&data,sizeof(MDS));
+    if (!data.root) {
+        CFS_pwd(fileDesc,data.parent_nodeid);
+        printf("/%s",data.filename);
+    } else {
+        printf("%s",data.filename);
+    }
 }
 
 int CFS_Run(CFS cfs) {
@@ -218,8 +360,6 @@ int CFS_Run(CFS cfs) {
                     strcpy(cfs->currentFile,file);
                     // Set current directory to root (/)
                     cfs->currentDirectoryId = 0;
-                    cfs->currentDirectory = (string)malloc(2*sizeof(char));
-                    strcpy(cfs->currentDirectory,"/");
                 }
                 DestroyString(&file);
             } else {
@@ -233,9 +373,20 @@ int CFS_Run(CFS cfs) {
                 // Check if directories were specified
                 if (!lastword) {
                     string dir;
+                    location loc;
+                    // Read paths for new directories
                     while (!lastword) {
                         dir = readNextWord(&lastword);
-                        CFS_CreateDirectory(cfs->fileDesc,dir,cfs->currentDirectoryId);
+                        // Get location for the new directory
+                        loc = getPathLocation(cfs->fileDesc,dir,cfs->currentDirectoryId,1);
+                        // Check if path exists
+                        if (loc.valid) {
+                            // Path exists so create the new directory there
+                            CFS_CreateDirectory(cfs->fileDesc,loc.filenanme,loc.nodeid);
+                        } else {
+                            // Path does not exist so throw an error
+                            printf("No such file or directory.\n");
+                        }
                         DestroyString(&dir);
                     }
                     DestroyString(&dir);
@@ -248,13 +399,80 @@ int CFS_Run(CFS cfs) {
                     IgnoreRemainingInput();
             }
         }
+        // Create new file
+        else if (!strcmp("cfs_touch",commandLabel)) {
+            // Check if options or files were specified
+            if (!lastword) {
+                int ok = 1;
+                // Read options
+                int options[2] = {0,0};
+                string option = readNextWord(&lastword);
+                int optionscount = 0;
+                while (!strcmp("-a",option) || !strcmp("-m",option)) {
+                    if (lastword) {
+                        ok = 0;
+                        DestroyString(&option);
+                        break;
+                    }
+                    // Modify access time only option
+                    if (!strcmp("-a",option)) {
+                        options[TOUCH_ACCESS] = 1;
+                    }
+                    else if (!strcmp("-m",option)) {
+                        options[TOUCH_MODIFICATION] = 1;
+                    }
+                    DestroyString(&option);
+                    option = readNextWord(&lastword);
+                    optionscount++;
+                }
+                if (ok) {
+                    // No options so activate both by default
+                    if (!(options[TOUCH_ACCESS] || options[TOUCH_MODIFICATION])) {
+                        options[TOUCH_ACCESS] = options[TOUCH_MODIFICATION] = 1;
+                    }
+                    // Read and create files
+                    string file = option;
+                    location loc;
+                    while (1) {
+                        // Check if file exists
+                        loc = getPathLocation(cfs->fileDesc,file,cfs->currentDirectoryId,0);
+                        if (loc.valid) {
+                            // File exists so just modify it's timestamps
+                            CFS_ModifyFileTimestamps(cfs->fileDesc,loc.nodeid,options[TOUCH_ACCESS],options[TOUCH_MODIFICATION]);
+                        } else {
+                            // File does not exist so create it
+                            // Get location for the new file
+                            loc = getPathLocation(cfs->fileDesc,file,cfs->currentDirectoryId,1);
+                            // Check if path exists
+                            if (loc.valid) {
+                                // Path exists so create the new file there
+                                CFS_CreateFile(cfs->fileDesc,loc.filenanme,loc.nodeid,"");
+                            } else {
+                                // Path does not exist so throw an error
+                                printf("No such file or directory.\n");
+                            }
+                        }
+                        DestroyString(&file);
+                        if (lastword)
+                            break;
+                        file = readNextWord(&lastword);
+                    }
+                } else {
+                    // No file(s) specified
+                    printf("Usage:cfs_touch <OPTIONS> <FILES>\n");
+                }
+            } else {
+                printf("Usage:cfs_touch <OPTIONS> <FILES>\n");
+            }
+        }
         // Print working directory (absolute path)
         else if (!strcmp("cfs_pwd",commandLabel)) {
             if (cfs->fileDesc != -1) {
-                printf("%s\n",cfs->currentDirectory);
+                CFS_pwd(cfs->fileDesc,cfs->currentDirectoryId);
             } else {
-                printf("Not currently working with a cfsd file.\n");
+                printf("Not currently working with a cfsd file.");
             }
+            printf("\n");
         }
         // Create new cfs file
         else if (!strcmp("cfs_create",commandLabel)) {
@@ -327,6 +545,7 @@ int CFS_Run(CFS cfs) {
             running = 0;
         } else {
             printf("Wrong command.\n");
+            IgnoreRemainingInput();
         }
         DestroyString(&commandLabel);
     }
@@ -340,8 +559,6 @@ int CFS_Destroy(CFS *cfs) {
             close((*cfs)->fileDesc);
         }
         // Free allocated memory for cfs
-        if ((*cfs)->currentDirectory != NULL)
-            free((*cfs)->currentDirectory);
         free(*cfs);
         *cfs = NULL;
         return 1;
