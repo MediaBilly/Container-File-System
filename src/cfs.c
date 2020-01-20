@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <locale.h>
 #include "../headers/cfs.h"
 #include "../headers/string_functions.h"
 
@@ -17,9 +18,17 @@
 #define TYPE_DIRECTORY 1
 #define TYPE_SHORTCUT 2
 
-// Define option flags
+// Define touch option flags
 #define TOUCH_ACCESS 0
 #define TOUCH_MODIFICATION 1
+
+// Define ls option flags
+#define LS_ALL_FILES 0
+#define LS_RECURSIVE_PRINT 1
+#define LS_ALL_ATTRIBUTES 2
+#define LS_UNORDERED 3
+#define LS_DIRECTORIES_ONLY 4
+#define LS_LINKS_ONLY 5
 
 // CFS structure definition
 struct cfs {
@@ -84,6 +93,7 @@ int CFS_Init(CFS *cfs) {
     // No initial current working file
     memset((*cfs)->currentFile,0,MAX_FILENAME_SIZE);
     (*cfs)->fileDesc = -1;
+    setlocale(LC_TIME, "el_GR.utf8");
     return 1;
 }
 
@@ -345,6 +355,77 @@ void CFS_pwd(int fileDesc,unsigned int nodeid,int last) {
     }
 }
 
+void CFS_PrintFileInfo(MDS data,int options[6]) {
+    // Ignore hidden files if -a option was not specified
+    if (!options[LS_ALL_FILES] && data.filename[0] == '.')
+        return;
+    // If -d option (only directories) was specified ignore other types
+    if (options[LS_DIRECTORIES_ONLY] && data.type != TYPE_DIRECTORY)
+        return;
+    // If -h option (only links) was specified ignore other types
+    if (options[LS_LINKS_ONLY] && data.type != TYPE_SHORTCUT)
+        return;
+    if (options[LS_ALL_ATTRIBUTES]) {
+        switch (data.type) {
+            case TYPE_DIRECTORY:
+                printf("dir ");
+                break;
+            case TYPE_SHORTCUT:
+                printf("link");
+                break;
+            case TYPE_FILE:
+                printf("file");
+                break;
+            default:
+                printf("    ");
+                break;
+        }
+        char creationTime[70],accessTime[70],modificationTime[70];
+        strftime(creationTime,sizeof(creationTime),"%c",localtime(&data.creation_time));
+        strftime(accessTime,sizeof(accessTime),"%c",localtime(&data.accessTime));
+        strftime(modificationTime,sizeof(modificationTime),"%c",localtime(&data.modificationTime));
+        printf(" %s %s %s %d %s\n",creationTime,accessTime,modificationTime,data.size,data.filename);
+    } else {
+        printf("%s ",data.filename);
+    }
+}
+
+void CFS_ls(int fileDesc,unsigned int nodeid,int options[6]) {
+    MDS data;
+    // Seek to the wanted block metadata
+    lseek(fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
+    // Get it's metadata
+    read(fileDesc,&data,sizeof(MDS));
+    // Determine data type
+    if (data.type == TYPE_DIRECTORY) {
+        // Directory so show all the contents of the directory
+        // Show info for all the directory's entities
+        unsigned int i,curId;
+        MDS tmpData;
+        for (i = 0; i < data.size/sizeof(int); i++) {
+            // Get id of the current entity
+            curId = *(unsigned int*)(data.data.datablocks + i*sizeof(int));
+            // Seek to the current entity metadata
+            lseek(fileDesc,sizeof(superblock) + curId * sizeof(MDS),SEEK_SET);
+            // Get it's metadata
+            read(fileDesc,&tmpData,sizeof(MDS));
+            // Print entity info
+            CFS_PrintFileInfo(tmpData,options);
+        }
+    } else if (data.type == TYPE_SHORTCUT) {
+        // Get pointed node metadata
+        MDS destData;
+        lseek(fileDesc,sizeof(superblock) + *(unsigned int*)(data.data.datablocks)*sizeof(MDS),SEEK_SET);
+        read(fileDesc,&destData,sizeof(MDS));
+        // Print destination contents
+        CFS_ls(fileDesc,destData.nodeid,options);
+    } else {
+        CFS_PrintFileInfo(data,options);
+    }
+    if (!options[LS_ALL_ATTRIBUTES])
+        printf("\n");
+}
+
 int CFS_Run(CFS cfs) {
     int running = 1;
     char *commandLabel;
@@ -381,6 +462,7 @@ int CFS_Run(CFS cfs) {
         }
         // Create directory (or directories)
         else if (!strcmp("cfs_mkdir",commandLabel)) {
+            // Check if we have an open file to work on
             if (cfs->fileDesc != -1) {
                 // Check if directories were specified
                 if (!lastword) {
@@ -413,103 +495,221 @@ int CFS_Run(CFS cfs) {
         }
         // Create new file
         else if (!strcmp("cfs_touch",commandLabel)) {
-            // Check if options or files were specified
-            if (!lastword) {
-                int ok = 1;
-                // Read options
-                int options[2] = {0,0};
-                string option = readNextWord(&lastword);
-                int optionscount = 0;
-                while (!strcmp("-a",option) || !strcmp("-m",option)) {
-                    if (lastword) {
-                        ok = 0;
-                        DestroyString(&option);
-                        break;
-                    }
-                    // Modify access time only option
-                    if (!strcmp("-a",option)) {
-                        options[TOUCH_ACCESS] = 1;
-                    }
-                    else if (!strcmp("-m",option)) {
-                        options[TOUCH_MODIFICATION] = 1;
-                    }
-                    DestroyString(&option);
-                    option = readNextWord(&lastword);
-                    optionscount++;
-                }
-                if (ok) {
-                    // No options so activate both by default
-                    if (!(options[TOUCH_ACCESS] || options[TOUCH_MODIFICATION])) {
-                        options[TOUCH_ACCESS] = options[TOUCH_MODIFICATION] = 1;
-                    }
-                    // Read and create files
-                    string file = option;
-                    location loc;
-                    while (1) {
-                        // Check if file exists
-                        loc = getPathLocation(cfs->fileDesc,file,cfs->currentDirectoryId,0);
-                        if (loc.valid) {
-                            // File exists so just modify it's timestamps
-                            CFS_ModifyFileTimestamps(cfs->fileDesc,loc.nodeid,options[TOUCH_ACCESS],options[TOUCH_MODIFICATION]);
-                        } else {
-                            // File does not exist so create it
-                            // Get location for the new file
-                            loc = getPathLocation(cfs->fileDesc,file,cfs->currentDirectoryId,1);
-                            // Check if path exists
-                            if (loc.valid) {
-                                // Path exists so create the new file there
-                                CFS_CreateFile(cfs->fileDesc,loc.filenanme,loc.nodeid,"");
-                            } else {
-                                // Path does not exist so throw an error
-                                printf("No such file or directory.\n");
-                            }
-                        }
-                        DestroyString(&file);
-                        if (lastword)
+            // Check if we have an open file to work on
+            if (cfs->fileDesc != -1) {
+                // Check if options or files were specified
+                if (!lastword) {
+                    int ok = 1;
+                    // Read options
+                    int options[2] = {0,0};
+                    string option = readNextWord(&lastword);
+                    int optionscount = 0;
+                    while (!strcmp("-a",option) || !strcmp("-m",option)) {
+                        if (lastword) {
+                            ok = 0;
+                            DestroyString(&option);
                             break;
-                        file = readNextWord(&lastword);
+                        }
+                        // Modify access time only option
+                        if (!strcmp("-a",option)) {
+                            options[TOUCH_ACCESS] = 1;
+                        }
+                        else if (!strcmp("-m",option)) {
+                            options[TOUCH_MODIFICATION] = 1;
+                        }
+                        DestroyString(&option);
+                        option = readNextWord(&lastword);
+                        optionscount++;
+                    }
+                    if (ok) {
+                        // No options so activate both by default
+                        if (!(options[TOUCH_ACCESS] || options[TOUCH_MODIFICATION])) {
+                            options[TOUCH_ACCESS] = options[TOUCH_MODIFICATION] = 1;
+                        }
+                        // Read and create files
+                        string file = option,filecopy;
+                        location loc;
+                        while (1) {
+                            filecopy = copyString(file);
+                            // Check if file exists
+                            loc = getPathLocation(cfs->fileDesc,file,cfs->currentDirectoryId,0);
+                            if (loc.valid) {
+                                // File exists so just modify it's timestamps
+                                CFS_ModifyFileTimestamps(cfs->fileDesc,loc.nodeid,options[TOUCH_ACCESS],options[TOUCH_MODIFICATION]);
+                            } else {
+                                // File does not exist so create it
+                                // Get location for the new file
+                                loc = getPathLocation(cfs->fileDesc,filecopy,cfs->currentDirectoryId,1);
+                                // Check if path exists
+                                if (loc.valid) {
+                                    // Path exists so create the new file there
+                                    CFS_CreateFile(cfs->fileDesc,loc.filenanme,loc.nodeid,"");
+                                } else {
+                                    // Path does not exist so throw an error
+                                    printf("No such file or directory.\n");
+                                }
+                            }
+                            DestroyString(&filecopy);
+                            DestroyString(&file);
+                            if (lastword)
+                                break;
+                            file = readNextWord(&lastword);
+                        }
+                    } else {
+                        // No file(s) specified
+                        printf("Usage:cfs_touch <OPTIONS> <FILES>\n");
                     }
                 } else {
-                    // No file(s) specified
                     printf("Usage:cfs_touch <OPTIONS> <FILES>\n");
                 }
             } else {
-                printf("Usage:cfs_touch <OPTIONS> <FILES>\n");
+                printf("Not currently working with a cfs file.\n");
             }
         }
         // Print working directory (absolute path)
         else if (!strcmp("cfs_pwd",commandLabel)) {
+            // Check if we have an open file to work on
             if (cfs->fileDesc != -1) {
                 CFS_pwd(cfs->fileDesc,cfs->currentDirectoryId,1);
             } else {
-                printf("Not currently working with a cfsd file.\n");
+                printf("Not currently working with a cfs file.\n");
             }
         }
         // Change directory
         else if (!strcmp("cfs_cd",commandLabel)) {
-            // Check if path was specified
-            if (!lastword) {
-                string path = readNextWord(&lastword);
-                // Check for correct usage (no other parameters)
-                if (lastword) {
-                    // Correect usage so change working directory
-                    location newdir = getPathLocation(cfs->fileDesc,path,cfs->currentDirectoryId,0);
-                    if (newdir.valid) {
-                        if (newdir.type == TYPE_DIRECTORY) {
-                            cfs->currentDirectoryId = newdir.nodeid;
+            // Check if we have an open file to work on
+            if (cfs->fileDesc != -1) {
+                // Check if path was specified
+                if (!lastword) {
+                    string path = readNextWord(&lastword);
+                    // Check for correct usage (no other parameters)
+                    if (lastword) {
+                        // Correect usage so change working directory
+                        location newdir = getPathLocation(cfs->fileDesc,path,cfs->currentDirectoryId,0);
+                        if (newdir.valid) {
+                            if (newdir.type == TYPE_DIRECTORY) {
+                                cfs->currentDirectoryId = newdir.nodeid;
+                            } else {
+                                printf("Not a directory.\n");
+                            }
                         } else {
-                            printf("Not a directory.\n");
+                            printf("No such file or directory.\n");
                         }
                     } else {
-                        printf("No such file or directory.\n");
+                        // Incorrect usage
+                        printf("Usage:cfs_cd <PATH>\n");
                     }
+                    DestroyString(&path);
                 } else {
-                    // Incorrect usage
+                    // Path not specified
                     printf("Usage:cfs_cd <PATH>\n");
                 }
             } else {
-                // Path not specified
-                printf("Usage:cfs_cd <PATH>\n");
+                printf("Not currently working with a cfs file.\n");
+            }
+        }
+        // Print files or folder contents(ls)
+        else if (!strcmp("cfs_ls",commandLabel)) {
+            // Check if we have an open file to work on
+            if (cfs->fileDesc != -1) {
+                // Check if parameters were specified
+                if (!lastword) {
+                    // At least 1 parameter was specified
+                    // Read options
+                    int options[6] = {0,0,0,0,0,0};
+                    // Read first option or file
+                    string option = readNextWord(&lastword);
+                    int ok = 1,lastwasoption = 0;
+                    unsigned int optionsCount = 0;
+                    while (option[0] == '-') {
+                        if (!strcmp("-a",option)) {
+                            options[LS_ALL_FILES] = 1;
+                        } else if (!strcmp("-r",option)) {
+                            options[LS_RECURSIVE_PRINT] = 1;
+                        } else if (!strcmp("-l",option)) {
+                            options[LS_ALL_ATTRIBUTES] = 1;
+                        } else if (!strcmp("-u",option)) {
+                            options[LS_UNORDERED] = 1;
+                        } else if (!strcmp("-d",option)) {
+                            if (options[LS_LINKS_ONLY]) {
+                                printf("Links-only option was previously specified and directories-only option cannot be specified.\n");
+                                ok = 0;
+                            } else {
+                                options[LS_DIRECTORIES_ONLY] = 1;
+                            }
+                        } else if (!strcmp("-h",option)) {
+                            if (options[LS_DIRECTORIES_ONLY]) {
+                                printf("Directories-only option was previously specified and links-only option cannot be specified.\n");
+                                ok = 0;
+                            } else {
+                                options[LS_LINKS_ONLY] = 1;
+                            }
+                        } else {
+                            printf("Wrong option\n");
+                            IgnoreRemainingInput();
+                            ok = 0;
+                        }
+                        if (!ok || lastword) {
+                            lastwasoption = 1;
+                            break;
+                        } else {
+                            DestroyString(&option);
+                            option = readNextWord(&lastword);
+                        }
+                        optionsCount++;
+                    }
+                    if (ok) {
+                        if (optionsCount) {
+                            if (!lastwasoption) {
+                                string path = option;
+                                // Read files (or directories)
+                                location loc;
+                                while (1) {
+                                    loc = getPathLocation(cfs->fileDesc,path,cfs->currentDirectoryId,0);
+                                    if (loc.valid) {
+                                        CFS_ls(cfs->fileDesc,loc.nodeid,options);
+                                    } else {
+                                        printf("No such file or directory.\n");
+                                    }
+                                    DestroyString(&path);
+                                    if (!lastword) {
+                                        path = readNextWord(&lastword);
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            } else {
+                                // Only options were specified so list the current directory
+                                CFS_ls(cfs->fileDesc,cfs->currentDirectoryId,options);
+                                DestroyString(&option);
+                            }
+                        } else {
+                            // Only directories specified
+                            string path = option;
+                            location loc;
+                            while (1){
+                                loc = getPathLocation(cfs->fileDesc,option,cfs->currentDirectoryId,0);
+                                if (loc.valid) {
+                                    CFS_ls(cfs->fileDesc,loc.nodeid,options);
+                                } else {
+                                    printf("No such file or directory.\n");
+                                }
+                                DestroyString(&path);
+                                if (!lastword) {
+                                    path = readNextWord(&lastword);
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // No parameters specified so list the current directory
+                    int options[6] = {0,0,0,0,0,0}; // Default options
+                    CFS_ls(cfs->fileDesc,cfs->currentDirectoryId,options);
+                }
+            } else {
+                printf("Not currently working with a cfs file.\n");
             }
         }
         // Create new cfs file
@@ -571,6 +771,7 @@ int CFS_Run(CFS cfs) {
                 } else {
                     // No file specified
                     printf("Usage:cfs_workwith <OPTIONS> <FILE>\n");
+                    IgnoreRemainingInput();
                 }
                 DestroyString(&option);
             } else {
@@ -583,7 +784,8 @@ int CFS_Run(CFS cfs) {
             running = 0;
         } else {
             printf("Wrong command.\n");
-            IgnoreRemainingInput();
+            if (!lastword)
+                IgnoreRemainingInput();
         }
         DestroyString(&commandLabel);
     }

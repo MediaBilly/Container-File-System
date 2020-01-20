@@ -46,6 +46,14 @@ string readNextWord(int *lastword) {
     return word;
 }
 
+string copyString(string str) {
+    string ret;
+    if ((ret = (string)malloc(strlen(str) + 1)) == NULL) 
+        return NULL;
+    strcpy(ret,str);
+    return ret;
+}
+
 void DestroyString(string *str) {
     if (*str != NULL) {
         free(*str);
