@@ -48,10 +48,21 @@ string readNextWord(int *lastword) {
 
 string copyString(string str) {
     string ret;
-    if ((ret = (string)malloc(strlen(str) + 1)) == NULL) 
+    if ((ret = (string)malloc(strlen(str) + 1)) == NULL) {
+        printf("Not enough memory.\n");
         return NULL;
+    }
     strcpy(ret,str);
     return ret;
+}
+
+int stringAppend(string *str,string substr) {
+    if ((*str = realloc(*str,strlen(*str) + strlen(substr) + 1)) == NULL) {
+        printf("Not enough memory.\n");
+        return 0;
+    }
+    strcpy(*str + strlen(*str),substr);
+    return 1;
 }
 
 void DestroyString(string *str) {

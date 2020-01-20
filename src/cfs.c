@@ -7,11 +7,7 @@
 #include <locale.h>
 #include "../headers/cfs.h"
 #include "../headers/string_functions.h"
-
-// File definitions
-#define DATABLOCK_NUM 1000
-#define FILE_PERMISSIONS 0644
-#define MAX_FILENAME_SIZE 50
+#include "../headers/minheap.h"
 
 // Define file types
 #define TYPE_FILE 0
@@ -44,29 +40,6 @@ typedef struct {
     int MAX_FILE_SIZE;
     int MAX_DIRECTORY_FILE_NUMBER;
 } superblock;
-
-// Datastream definition:
-// If entity is directory datablocks are the id's of the entities that the dir contains
-// If entity is shortcut datablocks contain the id of the entity that the shortcut connects to
-// If entity is file datablocks contain the file contents
-typedef struct {
-    char datablocks[DATABLOCK_NUM];
-} Datastream;
-
-// Metadata structure definition
-typedef struct {
-    char deleted; // 1 if the entity was previously deleted and o otherwise
-    char root; // 1 if root node and 0 otherwise
-    unsigned int nodeid;
-    char filename[MAX_FILENAME_SIZE];
-    unsigned int size;
-    unsigned int type;
-    unsigned int parent_nodeid;
-    time_t creation_time;
-    time_t accessTime;
-    time_t modificationTime;
-    Datastream data;
-} MDS;
 
 typedef struct {
     char valid;
@@ -390,7 +363,7 @@ void CFS_PrintFileInfo(MDS data,int options[6]) {
     }
 }
 
-void CFS_ls(int fileDesc,unsigned int nodeid,int options[6]) {
+void CFS_ls(int fileDesc,unsigned int nodeid,int options[6],string path) {
     MDS data;
     // Seek to the wanted block metadata
     lseek(fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
@@ -402,6 +375,13 @@ void CFS_ls(int fileDesc,unsigned int nodeid,int options[6]) {
         // Show info for all the directory's entities
         unsigned int i,curId;
         MDS tmpData;
+        MinHeap fileHeap;
+        // If we do not have the unorderedoption create a minheap to sort the contents
+        if (!options[LS_UNORDERED])
+            fileHeap = MinHeap_Create(data.size/sizeof(int));
+        // In recursive directory option print the current path
+        if (options[LS_RECURSIVE_PRINT])
+            printf("%s:\n",path);
         for (i = 0; i < data.size/sizeof(int); i++) {
             // Get id of the current entity
             curId = *(unsigned int*)(data.data.datablocks + i*sizeof(int));
@@ -409,8 +389,43 @@ void CFS_ls(int fileDesc,unsigned int nodeid,int options[6]) {
             lseek(fileDesc,sizeof(superblock) + curId * sizeof(MDS),SEEK_SET);
             // Get it's metadata
             read(fileDesc,&tmpData,sizeof(MDS));
-            // Print entity info
-            CFS_PrintFileInfo(tmpData,options);
+            // If we want ordered print store all the contents in a minheap and we will print them later
+            if (!options[LS_UNORDERED]) {
+                MinHeap_Insert(fileHeap,tmpData);
+            } else {
+                // Otherwise just print entity info
+                CFS_PrintFileInfo(tmpData,options);
+            }
+        }
+        // Print all the contents ordered if -u is not enabled
+        if (!options[LS_UNORDERED]) {
+            MDS tmp;
+            int empty = 0;
+            while (!empty){
+                tmp = MinHeap_ExtractMin(fileHeap,&empty);
+                if (!empty)
+                    CFS_PrintFileInfo(tmp,options);
+            }
+            MinHeap_Destroy(&fileHeap);
+        }
+        // In recursive print option recursively print all subfolder's contents
+        if (options[LS_RECURSIVE_PRINT]) {
+            for (i = 0; i < data.size/sizeof(int); i++) {
+                // Get id of the current entity
+                curId = *(unsigned int*)(data.data.datablocks + i*sizeof(int));
+                // Seek to the current entity metadata
+                lseek(fileDesc,sizeof(superblock) + curId * sizeof(MDS),SEEK_SET);
+                // Get it's metadata
+                read(fileDesc,&tmpData,sizeof(MDS));
+                // Recursively ls only on directories
+                if (tmpData.type == TYPE_DIRECTORY) {
+                    string newPath = copyString(path);
+                    stringAppend(&newPath,"/");
+                    stringAppend(&newPath,tmpData.filename);
+                    CFS_ls(fileDesc,tmpData.nodeid,options,newPath);
+                    DestroyString(&newPath);
+                }
+            }
         }
     } else if (data.type == TYPE_SHORTCUT) {
         // Get pointed node metadata
@@ -418,7 +433,7 @@ void CFS_ls(int fileDesc,unsigned int nodeid,int options[6]) {
         lseek(fileDesc,sizeof(superblock) + *(unsigned int*)(data.data.datablocks)*sizeof(MDS),SEEK_SET);
         read(fileDesc,&destData,sizeof(MDS));
         // Print destination contents
-        CFS_ls(fileDesc,destData.nodeid,options);
+        CFS_ls(fileDesc,destData.nodeid,options,destData.filename);
     } else {
         CFS_PrintFileInfo(data,options);
     }
@@ -564,15 +579,22 @@ int CFS_Run(CFS cfs) {
                 }
             } else {
                 printf("Not currently working with a cfs file.\n");
+                if (!lastword)
+                    IgnoreRemainingInput();
             }
         }
         // Print working directory (absolute path)
         else if (!strcmp("cfs_pwd",commandLabel)) {
             // Check if we have an open file to work on
-            if (cfs->fileDesc != -1) {
-                CFS_pwd(cfs->fileDesc,cfs->currentDirectoryId,1);
+            if (lastword) {
+                if (cfs->fileDesc != -1) {
+                    CFS_pwd(cfs->fileDesc,cfs->currentDirectoryId,1);
+                } else {
+                    printf("Not currently working with a cfs file.\n");
+                }
             } else {
-                printf("Not currently working with a cfs file.\n");
+                printf("Usage:cfs_pwd\n");
+                IgnoreRemainingInput();
             }
         }
         // Change directory
@@ -606,6 +628,7 @@ int CFS_Run(CFS cfs) {
                 }
             } else {
                 printf("Not currently working with a cfs file.\n");
+                IgnoreRemainingInput();
             }
         }
         // Print files or folder contents(ls)
@@ -649,6 +672,8 @@ int CFS_Run(CFS cfs) {
                             IgnoreRemainingInput();
                             ok = 0;
                         }
+                        if (ok)
+                            optionsCount++;
                         if (!ok || lastword) {
                             lastwasoption = 1;
                             break;
@@ -656,21 +681,22 @@ int CFS_Run(CFS cfs) {
                             DestroyString(&option);
                             option = readNextWord(&lastword);
                         }
-                        optionsCount++;
                     }
                     if (ok) {
                         if (optionsCount) {
                             if (!lastwasoption) {
-                                string path = option;
+                                string path = option,pathCopy;
                                 // Read files (or directories)
                                 location loc;
                                 while (1) {
+                                    pathCopy = copyString(path);
                                     loc = getPathLocation(cfs->fileDesc,path,cfs->currentDirectoryId,0);
                                     if (loc.valid) {
-                                        CFS_ls(cfs->fileDesc,loc.nodeid,options);
+                                        CFS_ls(cfs->fileDesc,loc.nodeid,options,pathCopy);
                                     } else {
                                         printf("No such file or directory.\n");
                                     }
+                                    DestroyString(&pathCopy);
                                     DestroyString(&path);
                                     if (!lastword) {
                                         path = readNextWord(&lastword);
@@ -680,20 +706,22 @@ int CFS_Run(CFS cfs) {
                                 }
                             } else {
                                 // Only options were specified so list the current directory
-                                CFS_ls(cfs->fileDesc,cfs->currentDirectoryId,options);
+                                CFS_ls(cfs->fileDesc,cfs->currentDirectoryId,options,".");
                                 DestroyString(&option);
                             }
                         } else {
                             // Only directories specified
-                            string path = option;
+                            string path = option,pathCopy;
                             location loc;
                             while (1){
+                                pathCopy = copyString(path);
                                 loc = getPathLocation(cfs->fileDesc,option,cfs->currentDirectoryId,0);
                                 if (loc.valid) {
-                                    CFS_ls(cfs->fileDesc,loc.nodeid,options);
+                                    CFS_ls(cfs->fileDesc,loc.nodeid,options,pathCopy);
                                 } else {
                                     printf("No such file or directory.\n");
                                 }
+                                DestroyString(&pathCopy);
                                 DestroyString(&path);
                                 if (!lastword) {
                                     path = readNextWord(&lastword);
@@ -706,10 +734,11 @@ int CFS_Run(CFS cfs) {
                 } else {
                     // No parameters specified so list the current directory
                     int options[6] = {0,0,0,0,0,0}; // Default options
-                    CFS_ls(cfs->fileDesc,cfs->currentDirectoryId,options);
+                    CFS_ls(cfs->fileDesc,cfs->currentDirectoryId,options,".");
                 }
             } else {
                 printf("Not currently working with a cfs file.\n");
+                IgnoreRemainingInput();
             }
         }
         // Create new cfs file

@@ -5,6 +5,7 @@ typedef char* string;
 
 string readNextWord(int*);
 string copyString(string);
+int stringAppend(string*,string);
 void IgnoreRemainingInput();
 void DestroyString(string*);
 
