@@ -280,7 +280,7 @@ int Create_CFS_File(string pathname,int BLOCK_SIZE,int FILENAME_SIZE,int MAX_FIL
     int fd = -1;
     // Check if sizes satisfy constraints
     if (MAX_FILE_SIZE <= DATABLOCK_NUM && FILENAME_SIZE <= MAX_FILENAME_SIZE && MAX_DIRECTORY_FILE_NUMBER <= MAX_FILE_SIZE/sizeof(unsigned int) && BLOCK_SIZE <= MAX_FILE_SIZE) {
-        // Create the file
+        // Create the file\
         fd = open(pathname,O_RDWR|O_CREAT|O_TRUNC,FILE_PERMISSIONS);
         // Check if creation was successful
         if (fd != -1) {
