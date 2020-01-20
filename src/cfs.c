@@ -5,9 +5,11 @@
 #include <unistd.h>
 #include <time.h>
 #include <locale.h>
+#include <sys/stat.h>
 #include "../headers/cfs.h"
 #include "../headers/string_functions.h"
 #include "../headers/minheap.h"
+#include "../headers/queue.h"
 
 // Define file types
 #define TYPE_FILE 0
@@ -31,6 +33,10 @@ struct cfs {
     int fileDesc; // File descriptor of currently working cfs file
     char currentFile[MAX_FILENAME_SIZE]; // Name of currently working cfs file
     int currentDirectoryId; // Nodeid for current directory
+    int BLOCK_SIZE;
+    int FILENAME_SIZE;
+    int MAX_FILE_SIZE;
+    int MAX_DIRECTORY_FILE_NUMBER;
 };
 
 // Superblock definition
@@ -231,13 +237,13 @@ int CFS_CreateFile(int fileDesc,string name,unsigned int dirnodeid,string conten
     data.root = 0;
     data.nodeid = CFS_GetNextAvailableNodeId(fileDesc);
     strcpy(data.filename,name);
-    data.size = 0;
+    data.size = strlen(content);
     data.type = TYPE_FILE;
     data.parent_nodeid = dirnodeid;
     time_t timer = time(NULL);
     data.creation_time = data.accessTime = data.modificationTime = timer;
     // Write content to datablocks
-    memcpy(data.data.datablocks,content,strlen(content) + 1);
+    memcpy(data.data.datablocks,content,strlen(content));
     // Write file data to cfs file
     write(fileDesc,&data,sizeof(MDS));
     // Write file descriptor to directory's node list
@@ -271,39 +277,45 @@ int CFS_ModifyFileTimestamps(int fileDesc,unsigned int nodeid,int access,int mod
 }
 
 int Create_CFS_File(string pathname,int BLOCK_SIZE,int FILENAME_SIZE,int MAX_FILE_SIZE,int MAX_DIRECTORY_FILE_NUMBER) {
-    // Create the file
-    int fd = open(pathname,O_RDWR|O_CREAT|O_TRUNC,FILE_PERMISSIONS);
-    // Check if creation was successful
-    if (fd != -1) {
-        // Write superblock data
-        superblock sb = {BLOCK_SIZE, FILENAME_SIZE, MAX_FILE_SIZE, MAX_DIRECTORY_FILE_NUMBER};
-        lseek(fd,0,SEEK_END);
-        write(fd,&sb,sizeof(superblock));
-        // Write root node data
-        MDS data;
-        // Initialize metadata bytes to 0 to avoid valgrind errors
-        memset(&data,0,sizeof(MDS));
-        // Initialize root directory metadata
-        data.deleted = 0;
-        data.root = 1;
-        data.nodeid = 0;
-        strcpy(data.filename,"/");
-        data.size = 0;
-        data.type = TYPE_DIRECTORY;
-        data.parent_nodeid = 0;
-        time_t timer = time(NULL);
-        data.creation_time = data.accessTime = data.modificationTime = timer;
-        lseek(fd,0,SEEK_END);
-        write(fd,&data,sizeof(MDS));
-        // Create . shortcut
-        CFS_CreateShortcut(fd,".",0,0);
-        // Create .. shortcut
-        CFS_CreateShortcut(fd,"..",0,0);
-        // Close the file after writing data
-        close(fd);
+    int fd = -1;
+    // Check if sizes satisfy constraints
+    if (MAX_FILE_SIZE <= DATABLOCK_NUM && FILENAME_SIZE <= MAX_FILENAME_SIZE && MAX_DIRECTORY_FILE_NUMBER <= MAX_FILE_SIZE/sizeof(unsigned int) && BLOCK_SIZE <= MAX_FILE_SIZE) {
+        // Create the file
+        fd = open(pathname,O_RDWR|O_CREAT|O_TRUNC,FILE_PERMISSIONS);
+        // Check if creation was successful
+        if (fd != -1) {
+            // Write superblock data
+            superblock sb = {BLOCK_SIZE, FILENAME_SIZE, MAX_FILE_SIZE, MAX_DIRECTORY_FILE_NUMBER};
+            lseek(fd,0,SEEK_END);
+            write(fd,&sb,sizeof(superblock));
+            // Write root node data
+            MDS data;
+            // Initialize metadata bytes to 0 to avoid valgrind errors
+            memset(&data,0,sizeof(MDS));
+            // Initialize root directory metadata
+            data.deleted = 0;
+            data.root = 1;
+            data.nodeid = 0;
+            strcpy(data.filename,"/");
+            data.size = 0;
+            data.type = TYPE_DIRECTORY;
+            data.parent_nodeid = 0;
+            time_t timer = time(NULL);
+            data.creation_time = data.accessTime = data.modificationTime = timer;
+            lseek(fd,0,SEEK_END);
+            write(fd,&data,sizeof(MDS));
+            // Create . shortcut
+            CFS_CreateShortcut(fd,".",0,0);
+            // Create .. shortcut
+            CFS_CreateShortcut(fd,"..",0,0);
+            // Close the file after writing data
+            close(fd);
+        } else {
+            perror("Error creating cfs file:");
+            return -1;
+        }
     } else {
-        perror("Error creating cfs file:");
-        return -1;
+        printf("Constraints are not satisfied.\n");
     }
     return fd;
 }
@@ -441,6 +453,41 @@ void CFS_ls(int fileDesc,unsigned int nodeid,int options[6],string path) {
         printf("\n");
 }
 
+string getEntityNameFromPath(string path) {
+    string token = strtok(path,"/");
+    string name;
+    while (token != NULL) {
+        name = token;
+        token = strtok(NULL,"/");
+    }
+    return name;
+}
+
+int CFS_ImportFile(CFS cfs,string source,unsigned int nodeid) {
+    // Open linux file
+    int fd = open(source,O_RDONLY);
+    // Get linux file size in bytes
+    unsigned int size = lseek(fd,0L,SEEK_END);
+    lseek(fd,0L,SEEK_SET);
+    // Check if linux file fits in cfs
+    string filename = getEntityNameFromPath(source);
+    if (size <= cfs->MAX_FILE_SIZE) {
+        // Linux file fits in cfs
+        // Read it's content
+        char bytes[size];
+        read(fd,bytes,size);
+        // Create the corresponding file in cfs
+        CFS_CreateFile(cfs->fileDesc,filename,nodeid,bytes);
+        return 1;
+    } else {
+        // Linux file does not fit in cfs
+        printf("File %s does not fit in cfs.\n",filename);
+        return 0;
+    }
+    // Close linux file
+    close(fd);
+}
+
 int CFS_Run(CFS cfs) {
     int running = 1;
     char *commandLabel;
@@ -468,6 +515,14 @@ int CFS_Run(CFS cfs) {
                     strcpy(cfs->currentFile,file);
                     // Set current directory to root (/)
                     cfs->currentDirectoryId = 0;
+                    // Read file's parameters from superblock
+                    lseek(cfs->fileDesc,0L,SEEK_SET);
+                    superblock sb;
+                    read(cfs->fileDesc,&sb,sizeof(superblock));
+                    cfs->BLOCK_SIZE = sb.BLOCK_SIZE;
+                    cfs->FILENAME_SIZE = sb.FILENAME_SIZE;
+                    cfs->MAX_DIRECTORY_FILE_NUMBER = sb.MAX_DIRECTORY_FILE_NUMBER;
+                    cfs->MAX_FILE_SIZE = sb.MAX_FILE_SIZE;
                 }
                 DestroyString(&file);
             } else {
@@ -735,6 +790,66 @@ int CFS_Run(CFS cfs) {
                     // No parameters specified so list the current directory
                     int options[6] = {0,0,0,0,0,0}; // Default options
                     CFS_ls(cfs->fileDesc,cfs->currentDirectoryId,options,".");
+                }
+            } else {
+                printf("Not currently working with a cfs file.\n");
+                IgnoreRemainingInput();
+            }
+        }
+        // Import linux files/directories to cfs
+        else if (!strcmp("cfs_import",commandLabel)) {
+            // Check if we have an open file to work on
+            if (cfs->fileDesc != -1) {
+                // Check if sources and destination directory were specified
+                if (!lastword) {
+                    // Read sources and add them to the queue
+                    string argument = NULL;
+                    Queue sourcesQueue;
+                    Queue_Create(&sourcesQueue);
+                    do {
+                        DestroyString(&argument);
+                        argument = readNextWord(&lastword);
+                        if (!lastword)
+                            Queue_Push(sourcesQueue,argument);
+                    } while (!lastword);
+                    // Read directory
+                    string directory = argument;
+                    // Get directory location in cfs
+                    location loc = getPathLocation(cfs->fileDesc,directory,cfs->currentDirectoryId,0);
+                    // Check if directory exists
+                    if (loc.valid && loc.type == TYPE_DIRECTORY) {
+                        // Read all sources from linux and import their contents in cfs
+                        string source;
+                        struct stat sourceinfo;
+                        while (!Queue_Empty(sourcesQueue)) {
+                            source = Queue_Pop(sourcesQueue);
+                            // Get current source type(file or directory)
+                            if (stat(source,&sourceinfo) != -1) {
+                                if (S_ISREG(sourceinfo.st_mode)) {
+                                    // Regular file
+                                    // Insert it to cfs
+                                    CFS_ImportFile(cfs,source,loc.nodeid);
+                                } else if (S_ISDIR(sourceinfo.st_mode)) {
+                                    // Directory
+                                    printf("%s directory\n",source);
+                                    // TODO:recursively import directory's content (files and directories) in cfs
+                                } else {
+                                    printf("Other\n");
+                                }
+                            } else {
+                                perror("Failed  to get  file  status");
+                            }
+                            DestroyString(&source);
+                        }
+                        DestroyString(&directory);
+                        Queue_Destroy(&sourcesQueue);
+                    } else {
+                        // Not a directory
+                        printf("No such directory %s.\n",directory);
+                    }
+                } else {
+                    // Nothing was specified
+                    printf("Usage:cfs_import <SOURCES> ... <DIRECTORY>\n");
                 }
             } else {
                 printf("Not currently working with a cfs file.\n");

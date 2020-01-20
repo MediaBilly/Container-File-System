@@ -1,6 +1,6 @@
 CC = gcc
-FLAGS = -Wall -g3
-TARGETS = src/main.o src/cfs.o src/string_functions.o src/minheap.o
+FLAGS = -Wall
+TARGETS = src/main.o src/cfs.o src/string_functions.o src/minheap.o src/queue.o
 
 cfs:$(TARGETS)
 	$(CC) $(FLAGS) -o cfs $(TARGETS)
@@ -16,6 +16,9 @@ src/string_functions.o:src/string_functions.c
 
 src/minheap.o:src/minheap.c
 	$(CC) $(FLAGS) -o src/minheap.o -c src/minheap.c
+
+src/queue.o:src/queue.c
+	$(CC) $(FLAGS) -o src/queue.o -c src/queue.c
 
 .PHONY : clean
 
