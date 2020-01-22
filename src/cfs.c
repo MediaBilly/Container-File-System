@@ -6,6 +6,9 @@
 #include <time.h>
 #include <locale.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <libgen.h>
 #include "../headers/cfs.h"
 #include "../headers/string_functions.h"
 #include "../headers/minheap.h"
@@ -116,6 +119,14 @@ unsigned int getNodeIdFromName(int fileDesc,string name,unsigned int nodeid,int 
     return data.nodeid;
 }
 
+// Checks if an entity with a specific name exists in a specific directory
+int exists(int fileDesc,string name,unsigned int dirnodeid) {
+    int found;
+    unsigned int type;
+    getNodeIdFromName(fileDesc,name,dirnodeid,&found,&type);
+    return found;
+}
+
 location getPathLocation(int fileDesc,string path,unsigned int nodeid,int ignoreLastEntity) {
     string entityName = strtok(path,"/");
     // Determine path type
@@ -168,7 +179,7 @@ unsigned int CFS_GetNextAvailableNodeId(int fileDesc) {
     return data.nodeid + 1;
 }
 
-int CFS_CreateShortcut(int fileDesc,string name,unsigned int nodeid,unsigned int destNodeId) {
+unsigned int CFS_CreateShortcut(int fileDesc,string name,unsigned int nodeid,unsigned int destNodeId) {
     MDS data;
     // Initialize metadata bytes to 0 to avoid valgrind errors
     memset(&data,0,sizeof(MDS));
@@ -194,10 +205,10 @@ int CFS_CreateShortcut(int fileDesc,string name,unsigned int nodeid,unsigned int
     locationData.size += sizeof(unsigned int);
     lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
     write(fileDesc,&locationData,sizeof(MDS));
-    return 1;
+    return data.nodeid;
 }
 
-int CFS_CreateDirectory(int fileDesc,string name,unsigned int nodeid) {
+unsigned int CFS_CreateDirectory(int fileDesc,string name,unsigned int nodeid) {
     MDS data;
     // Initialize metadata bytes to 0 to avoid valgrind errors
     memset(&data,0,sizeof(MDS));
@@ -225,10 +236,10 @@ int CFS_CreateDirectory(int fileDesc,string name,unsigned int nodeid) {
     CFS_CreateShortcut(fileDesc,".",data.nodeid,data.nodeid);
     // Create .. shortcut
     CFS_CreateShortcut(fileDesc,"..",data.nodeid,nodeid);
-    return 1;
+    return data.nodeid;
 }
 
-int CFS_CreateFile(int fileDesc,string name,unsigned int dirnodeid,string content) {
+unsigned int CFS_CreateFile(int fileDesc,string name,unsigned int dirnodeid,char content[DATABLOCK_NUM],int size) {
     MDS data;
     // Initialize metadata bytes to 0 to avoid valgrind errors
     memset(&data,0,sizeof(MDS));
@@ -237,13 +248,13 @@ int CFS_CreateFile(int fileDesc,string name,unsigned int dirnodeid,string conten
     data.root = 0;
     data.nodeid = CFS_GetNextAvailableNodeId(fileDesc);
     strcpy(data.filename,name);
-    data.size = strlen(content);
+    data.size = size;
     data.type = TYPE_FILE;
     data.parent_nodeid = dirnodeid;
     time_t timer = time(NULL);
     data.creation_time = data.accessTime = data.modificationTime = timer;
     // Write content to datablocks
-    memcpy(data.data.datablocks,content,strlen(content));
+    memcpy(data.data.datablocks,content,size);
     // Write file data to cfs file
     write(fileDesc,&data,sizeof(MDS));
     // Write file descriptor to directory's node list
@@ -254,7 +265,7 @@ int CFS_CreateFile(int fileDesc,string name,unsigned int dirnodeid,string conten
     locationData.size += sizeof(int);
     lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
     write(fileDesc,&locationData,sizeof(MDS));
-    return 1;
+    return data.nodeid;
 }
 
 int CFS_ModifyFileTimestamps(int fileDesc,unsigned int nodeid,int access,int modification) {
@@ -280,7 +291,7 @@ int Create_CFS_File(string pathname,int BLOCK_SIZE,int FILENAME_SIZE,int MAX_FIL
     int fd = -1;
     // Check if sizes satisfy constraints
     if (MAX_FILE_SIZE <= DATABLOCK_NUM && FILENAME_SIZE <= MAX_FILENAME_SIZE && MAX_DIRECTORY_FILE_NUMBER <= MAX_FILE_SIZE/sizeof(unsigned int) && BLOCK_SIZE <= MAX_FILE_SIZE) {
-        // Create the file\
+        // Create the file
         fd = open(pathname,O_RDWR|O_CREAT|O_TRUNC,FILE_PERMISSIONS);
         // Check if creation was successful
         if (fd != -1) {
@@ -464,28 +475,100 @@ string getEntityNameFromPath(string path) {
 }
 
 int CFS_ImportFile(CFS cfs,string source,unsigned int nodeid) {
-    // Open linux file
-    int fd = open(source,O_RDONLY);
-    // Get linux file size in bytes
-    unsigned int size = lseek(fd,0L,SEEK_END);
-    lseek(fd,0L,SEEK_SET);
-    // Check if linux file fits in cfs
-    string filename = getEntityNameFromPath(source);
-    if (size <= cfs->MAX_FILE_SIZE) {
-        // Linux file fits in cfs
-        // Read it's content
-        char bytes[size];
-        read(fd,bytes,size);
-        // Create the corresponding file in cfs
-        CFS_CreateFile(cfs->fileDesc,filename,nodeid,bytes);
-        return 1;
+    // Check if file exists in cfs
+    if (!exists(cfs->fileDesc,getEntityNameFromPath(source),nodeid)) {
+        // Open linux file
+        int fd = open(source,O_RDONLY);
+        // Get linux file size in bytes
+        unsigned int size = lseek(fd,0L,SEEK_END);
+        lseek(fd,0L,SEEK_SET);
+        // Check if linux file fits in cfs
+        string filename = getEntityNameFromPath(source);
+        if (size <= cfs->MAX_FILE_SIZE) {
+            // Linux file fits in cfs
+            // Read it's content
+            char bytes[DATABLOCK_NUM];
+            read(fd,bytes,size);
+            //printf("%s\n",bytes);
+            // Create the corresponding file in cfs
+            CFS_CreateFile(cfs->fileDesc,filename,nodeid,bytes,size);
+        } else {
+            // Linux file does not fit in cfs
+            printf("File %s does not fit in cfs.\n",filename);
+            return 0;
+        }
+        // Close linux file
+        close(fd);
     } else {
-        // Linux file does not fit in cfs
-        printf("File %s does not fit in cfs.\n",filename);
+        printf("File %s already exists\n",getEntityNameFromPath(source));
         return 0;
     }
-    // Close linux file
-    close(fd);
+    return 1;
+}
+
+int CFS_ImportDirectory(CFS cfs,string source,unsigned int nodeid) {
+    struct stat entryinfo;
+    DIR *dirp;
+    struct dirent *dirContent;
+    // Open linux directory
+    dirp = opendir(source);
+    // Read and import all entries
+    while ((dirContent = readdir(dirp)) != NULL) {
+        // Ignore . , .. directories and deleted entities
+        if (!strcmp(".",dirContent->d_name) || !strcmp("..",dirContent->d_name) || dirContent->d_ino == 0)
+            continue;
+        // Recursively import all elements in linux directory 
+        string dirContentPath = copyString(source);
+        stringAppend(&dirContentPath,"/");
+        stringAppend(&dirContentPath,dirContent->d_name);
+        // Get entry type
+        if (stat(dirContentPath,&entryinfo) != -1) {
+            if (S_ISDIR(entryinfo.st_mode)) {
+                // Directory
+                // Check if corresponding directory exists
+                if (!exists(cfs->fileDesc,dirContent->d_name,nodeid)) {
+                    // Create corresponding directory in cfs
+                    unsigned int dirNodeId = CFS_CreateDirectory(cfs->fileDesc,dirContent->d_name,nodeid);
+                    // Recursively import linux directory's content to cfs directory
+                    CFS_ImportDirectory(cfs,dirContentPath,dirNodeId);
+                } else {
+                    printf("File %s already exists\n",dirContent->d_name);
+                }
+            } else if (S_ISREG(entryinfo.st_mode)) {
+                // Regular file
+                CFS_ImportFile(cfs,dirContentPath,nodeid);
+            } else {
+                printf("Unknown file type of %s\n",source);
+            }
+        } else {
+            perror("Failed  to get  file  status");
+        }
+        DestroyString(&dirContentPath);
+    }
+    // Close linux directory
+    closedir(dirp);
+    return 1;
+}
+
+int CFS_ImportSource(CFS cfs,string source,unsigned int nodeid) {
+    struct stat sourceinfo;
+    // Get source type
+    if (stat(source,&sourceinfo) != -1) {
+        if (S_ISDIR(sourceinfo.st_mode)) {
+            // Directory
+            CFS_ImportDirectory(cfs,source,nodeid);
+        } else if (S_ISREG(sourceinfo.st_mode)) {
+            // Regular file
+            CFS_ImportFile(cfs,source,nodeid);
+        } else {
+            printf("Unknown file type of %s\n",source);
+            return 0;
+        }
+    } else {
+        perror("Failed  to get  file  status");
+        return 0;
+    }
+    return 1;
 }
 
 int CFS_Run(CFS cfs) {
@@ -541,16 +624,24 @@ int CFS_Run(CFS cfs) {
                     // Read paths for new directories
                     while (!lastword) {
                         dir = readNextWord(&lastword);
-                        // Get location for the new directory
-                        loc = getPathLocation(cfs->fileDesc,dir,cfs->currentDirectoryId,1);
-                        // Check if path exists
-                        if (loc.valid) {
-                            // Path exists so create the new directory there
-                            CFS_CreateDirectory(cfs->fileDesc,loc.filenanme,loc.nodeid);
+                        // Check if directory exists
+                        string dirCopy = copyString(dir);
+                        loc = getPathLocation(cfs->fileDesc,dirCopy,cfs->currentDirectoryId,0);
+                        if (!loc.valid) {
+                            // Get location for the new directory
+                            loc = getPathLocation(cfs->fileDesc,dir,cfs->currentDirectoryId,1);
+                            // Check if path exists
+                            if (loc.valid) {
+                                // Path exists so create the new directory there
+                                CFS_CreateDirectory(cfs->fileDesc,loc.filenanme,loc.nodeid);
+                            } else {
+                                // Path does not exist so throw an error
+                                printf("No such file or directory.\n");
+                            }
                         } else {
-                            // Path does not exist so throw an error
-                            printf("No such file or directory.\n");
+                            printf("File %s already exists\n",dir);
                         }
+                        DestroyString(&dirCopy);
                         DestroyString(&dir);
                     }
                     DestroyString(&dir);
@@ -613,7 +704,7 @@ int CFS_Run(CFS cfs) {
                                 // Check if path exists
                                 if (loc.valid) {
                                     // Path exists so create the new file there
-                                    CFS_CreateFile(cfs->fileDesc,loc.filenanme,loc.nodeid,"");
+                                    CFS_CreateFile(cfs->fileDesc,loc.filenanme,loc.nodeid,"",0);
                                 } else {
                                     // Path does not exist so throw an error
                                     printf("No such file or directory.\n");
@@ -820,25 +911,9 @@ int CFS_Run(CFS cfs) {
                     if (loc.valid && loc.type == TYPE_DIRECTORY) {
                         // Read all sources from linux and import their contents in cfs
                         string source;
-                        struct stat sourceinfo;
                         while (!Queue_Empty(sourcesQueue)) {
                             source = Queue_Pop(sourcesQueue);
-                            // Get current source type(file or directory)
-                            if (stat(source,&sourceinfo) != -1) {
-                                if (S_ISREG(sourceinfo.st_mode)) {
-                                    // Regular file
-                                    // Insert it to cfs
-                                    CFS_ImportFile(cfs,source,loc.nodeid);
-                                } else if (S_ISDIR(sourceinfo.st_mode)) {
-                                    // Directory
-                                    printf("%s directory\n",source);
-                                    // TODO:recursively import directory's content (files and directories) in cfs
-                                } else {
-                                    printf("Other\n");
-                                }
-                            } else {
-                                perror("Failed  to get  file  status");
-                            }
+                            CFS_ImportSource(cfs,source,loc.nodeid);
                             DestroyString(&source);
                         }
                         DestroyString(&directory);

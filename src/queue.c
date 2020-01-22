@@ -8,6 +8,7 @@ struct queue
 {
   unsigned int count;
   QueueNode front;
+  QueueNode back;
 };
 
 struct qnode {
@@ -23,7 +24,7 @@ int Queue_Create(Queue *q) {
   }
   // Initialize attributes
   (*q)->count = 0;
-  (*q)->front = NULL;
+  (*q)->front = (*q)->back = NULL;
   return 1;
 }
 
@@ -31,14 +32,19 @@ int Queue_Push(Queue q,string element) {
   // Check if queue was previously inititialized
   if (q != NULL) {
     // Keep current front in a temporary variable
-    QueueNode tmp = q->front;
     // Allocate memory for new element
-    if ((q->front = (QueueNode)malloc(sizeof(struct qnode))) == NULL) {
+    QueueNode tmp = q->back;
+    if ((q->back = (QueueNode)malloc(sizeof(struct qnode))) == NULL) {
       printf("Not enough memory.\n");
       return 0;
     }
-    q->front->element = copyString(element);
-    q->front->next = tmp;
+    q->back->element = copyString(element);
+    q->back->next = NULL;
+    // 1st element
+    if (q->count == 0)
+      q->front = q->back;
+    else
+      tmp->next = q->back;
     q->count++;
     return 1;
   } else {

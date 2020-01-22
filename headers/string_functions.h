@@ -7,6 +7,7 @@ string readNextWord(int*);
 string copyString(string);
 int stringAppend(string*,string);
 void IgnoreRemainingInput();
+// Removes possible ./ or /. from path start
 void DestroyString(string*);
 
 #endif
