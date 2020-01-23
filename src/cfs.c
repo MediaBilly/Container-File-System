@@ -571,6 +571,87 @@ int CFS_ImportSource(CFS cfs,string source,unsigned int nodeid) {
     return 1;
 }
 
+int CFS_ExportFile(CFS cfs,unsigned int nodeid,string directory) {
+    // Get file data
+    MDS data;
+    lseek(cfs->fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
+    read(cfs->fileDesc,&data,sizeof(MDS));
+    // Determine export path
+    string path = copyString(directory);
+    stringAppend(&path,"/");
+    stringAppend(&path,data.filename);
+    // Create file in linux and check if creation was ok
+    int fd;
+    if ((fd = open(path,O_CREAT|O_WRONLY|O_TRUNC,FILE_PERMISSIONS)) != -1) {
+        // Successful creation so write data
+        write(fd,data.data.datablocks,data.size);
+        // Close the file
+        close(fd);
+        DestroyString(&path);
+        return 1;
+    } else {
+        DestroyString(&path);
+        perror("File creation error");
+        return 0;
+    }
+}
+
+int CFS_ExportDirectory(CFS cfs,unsigned int nodeid,string directory) {
+    // Get directory data
+    MDS data;
+    lseek(cfs->fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
+    read(cfs->fileDesc,&data,sizeof(MDS));
+    // Loop through all the entities
+    unsigned int i,curId;
+    MDS tmpData;
+    string path;
+    for (i = 0; i < data.size/sizeof(int); i++) {
+        // Get id of the current entity
+        curId = *(unsigned int*)(data.data.datablocks + i*sizeof(int));
+        // Seek to the current entity metadata
+        lseek(cfs->fileDesc,sizeof(superblock) + curId * sizeof(MDS),SEEK_SET);
+        // Get it's metadata
+        read(cfs->fileDesc,&tmpData,sizeof(MDS));
+        // Check it's type
+        if (tmpData.type == TYPE_DIRECTORY) {
+            // Directory
+            // Create the corresponding directory in linux
+            path = copyString(directory);
+            stringAppend(&path,"/");
+            stringAppend(&path,tmpData.filename);
+            mkdir(path,FILE_PERMISSIONS);
+            // Recursively export content of the current directory
+            CFS_ExportDirectory(cfs,tmpData.nodeid,path);
+            DestroyString(&path);
+        } else if (tmpData.type == TYPE_FILE) {
+            // Regular file
+            CFS_ExportFile(cfs,tmpData.nodeid,directory);
+        }
+    }
+    return 1;
+}
+
+int CFS_ExportSource(CFS cfs,string source,string directory) {
+    // Get source location
+    string sourceBackup = copyString(source);
+    location loc = getPathLocation(cfs->fileDesc,sourceBackup,cfs->currentDirectoryId,0);
+    DestroyString(&sourceBackup);
+    // Check if it exists
+    if (loc.valid) {
+        // Check source type (shortcuts are not exported)
+        if (loc.type == TYPE_DIRECTORY) {
+            // Directory
+            CFS_ExportDirectory(cfs,loc.nodeid,directory);
+        } else if (loc.type == TYPE_FILE) {
+            // Regular file
+            CFS_ExportFile(cfs,loc.nodeid,directory);
+        }
+    } else {
+        printf("%s not found.\n",source);
+    }
+    return 1;
+}
+
 int CFS_Run(CFS cfs) {
     int running = 1;
     char *commandLabel;
@@ -914,6 +995,49 @@ int CFS_Run(CFS cfs) {
                         while (!Queue_Empty(sourcesQueue)) {
                             source = Queue_Pop(sourcesQueue);
                             CFS_ImportSource(cfs,source,loc.nodeid);
+                            DestroyString(&source);
+                        }
+                        DestroyString(&directory);
+                        Queue_Destroy(&sourcesQueue);
+                    } else {
+                        // Not a directory
+                        printf("No such directory %s.\n",directory);
+                    }
+                } else {
+                    // Nothing was specified
+                    printf("Usage:cfs_import <SOURCES> ... <DIRECTORY>\n");
+                }
+            } else {
+                printf("Not currently working with a cfs file.\n");
+                IgnoreRemainingInput();
+            }
+        }
+        // Export cfs files/directories to linux fs
+        else if (!strcmp("cfs_export",commandLabel)) {
+            // Check if we have an open file to work on
+            if (cfs->fileDesc != -1) {
+                // Check if sources and destination directory were specified
+                if (!lastword) {
+                    // Read sources and add them to the queue
+                    string argument = NULL;
+                    Queue sourcesQueue;
+                    Queue_Create(&sourcesQueue);
+                    do {
+                        DestroyString(&argument);
+                        argument = readNextWord(&lastword);
+                        if (!lastword)
+                            Queue_Push(sourcesQueue,argument);
+                    } while (!lastword);
+                    // Read directory
+                    string directory = argument;
+                    // Check if directory exists
+                    struct stat st;
+                    if (stat(directory,&st) == 0 && S_ISDIR(st.st_mode)) {
+                        // Read all sources from linux and import their contents in cfs
+                        string source;
+                        while (!Queue_Empty(sourcesQueue)) {
+                            source = Queue_Pop(sourcesQueue);
+                            CFS_ExportSource(cfs,source,directory);
                             DestroyString(&source);
                         }
                         DestroyString(&directory);
