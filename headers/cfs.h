@@ -6,7 +6,7 @@
 typedef struct cfs *CFS;
 
 // File definitions
-#define DATABLOCK_NUM 1000
+#define DATABLOCK_NUM 5000
 #define FILE_PERMISSIONS 0755
 #define MAX_FILENAME_SIZE 50
 

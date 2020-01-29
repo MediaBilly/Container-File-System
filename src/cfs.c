@@ -18,6 +18,7 @@
 #define TYPE_FILE 0
 #define TYPE_DIRECTORY 1
 #define TYPE_SHORTCUT 2
+#define TYPE_HARDLINK 3
 
 // Define touch option flags
 #define TOUCH_ACCESS 0
@@ -93,9 +94,9 @@ unsigned int getNodeIdFromName(int fileDesc,string name,unsigned int nodeid,int 
         unsigned int i,curId;
         MDS tmpData;
         *found = 0;
-        for (i = 0; i < data.size/sizeof(int); i++) {
+        for (i = 0; i < data.size/sizeof(unsigned int); i++) {
             // Get id of the current entity
-            curId = *(unsigned int*)(data.data.datablocks + i*sizeof(int));
+            curId = *(unsigned int*)(data.data.datablocks + i*sizeof(unsigned int));
             // Seek to the current entity metadata
             lseek(fileDesc,sizeof(superblock) + curId * sizeof(MDS),SEEK_SET);
             // Get it's metadata
@@ -212,7 +213,7 @@ unsigned int CFS_CreateDirectory(int fileDesc,string name,unsigned int nodeid) {
     MDS data;
     // Initialize metadata bytes to 0 to avoid valgrind errors
     memset(&data,0,sizeof(MDS));
-    // Initialize shortcut metadata
+    // Initialize directory metadata
     data.deleted = 0;
     data.root = 0;
     data.nodeid = CFS_GetNextAvailableNodeId(fileDesc);
@@ -228,8 +229,8 @@ unsigned int CFS_CreateDirectory(int fileDesc,string name,unsigned int nodeid) {
     lseek(fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
     MDS locationData;
     read(fileDesc,&locationData,sizeof(MDS));
-    memcpy(locationData.data.datablocks + locationData.size,&data.nodeid,sizeof(int));
-    locationData.size += sizeof(int);
+    memcpy(locationData.data.datablocks + locationData.size,&data.nodeid,sizeof(unsigned int));
+    locationData.size += sizeof(unsigned int);
     lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
     write(fileDesc,&locationData,sizeof(MDS));
     // Create . shortcut
@@ -243,7 +244,7 @@ unsigned int CFS_CreateFile(int fileDesc,string name,unsigned int dirnodeid,char
     MDS data;
     // Initialize metadata bytes to 0 to avoid valgrind errors
     memset(&data,0,sizeof(MDS));
-    // Initialize shortcut metadata
+    // Initialize file metadata
     data.deleted = 0;
     data.root = 0;
     data.nodeid = CFS_GetNextAvailableNodeId(fileDesc);
@@ -261,12 +262,92 @@ unsigned int CFS_CreateFile(int fileDesc,string name,unsigned int dirnodeid,char
     lseek(fileDesc,sizeof(superblock) + dirnodeid * sizeof(MDS),SEEK_SET);
     MDS locationData;
     read(fileDesc,&locationData,sizeof(MDS));
-    memcpy(locationData.data.datablocks + locationData.size,&data.nodeid,sizeof(int));
-    locationData.size += sizeof(int);
+    memcpy(locationData.data.datablocks + locationData.size,&data.nodeid,sizeof(unsigned int));
+    locationData.size += sizeof(unsigned int);
     lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
     write(fileDesc,&locationData,sizeof(MDS));
     return data.nodeid;
 }
+
+int CFS_CreateHardLink(int fileDesc,string outputfilename,unsigned int sourcenodeid,unsigned int dirnodeid) {
+    MDS data;
+    // Initialize metadata bytes to 0 to avoid valgrind errors
+    memset(&data,0,sizeof(MDS));
+    // Initialize link metadata
+    data.deleted = 0;
+    data.root = 0;
+    data.nodeid = CFS_GetNextAvailableNodeId(fileDesc);
+    strcpy(data.filename,outputfilename);
+    data.size = sizeof(unsigned int);
+    data.type = TYPE_HARDLINK;
+    data.parent_nodeid = dirnodeid;
+    time_t timer = time(NULL);
+    data.creation_time = data.accessTime = data.modificationTime = timer;
+    // Write source node id(link to) to datablocks
+    memcpy(data.data.datablocks,&sourcenodeid,sizeof(unsigned int));
+    // Write link data to cfs file
+    write(fileDesc,&data,sizeof(MDS));
+    // Get parent directory data
+    MDS parentData;
+    lseek(fileDesc,sizeof(superblock) + dirnodeid * sizeof(MDS),SEEK_SET);
+    read(fileDesc,&parentData,sizeof(MDS));
+    // Write shortcut descriptor to parent directory's node list
+    memcpy(parentData.data.datablocks + parentData.size,&data.nodeid,sizeof(unsigned int));
+    parentData.size += sizeof(unsigned int);
+    lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
+    write(fileDesc,&parentData,sizeof(MDS));
+    return data.nodeid;
+}
+
+/*
+// Determines whether a directory is empty or not
+int CFS_DirectoryIsEmpty(int fileDesc,unsigned int nodeId) {
+    //Get directory data
+    MDS data;
+    lseek(fileDesc,sizeof(superblock) + nodeId * sizeof(MDS),SEEK_SET);
+    read(fileDesc,&data,sizeof(MDS));
+    // A cfs directory is empty only when it's only contents are . and .. shortcuts
+    return data.type == TYPE_DIRECTORY && data.size == 2*sizeof(unsigned int);
+}
+
+int CFS_RemoveEntity(int fileDesc,string name,unsigned int nodeId) {
+    // Ignore root directory
+    if (nodeId == 0) {
+        return 0;
+    }
+    // Seek to the directory where the file is located
+    lseek(fileDesc,sizeof(superblock) + nodeId * sizeof(MDS),SEEK_SET);
+    MDS data;
+    read(fileDesc,&data,sizeof(MDS));
+    // Mark as deleted
+
+    // Get parent directory data
+    MDS parentData;
+    lseek(fileDesc,sizeof(superblock) + data.parent_nodeid,SEEK_SET);
+    read(fileDesc,&parentData,sizeof(MDS));
+    // Write last content in parent directory
+    
+    return 1;
+}
+
+int CFS_RemoveDirectoryContent(int fileDesc,unsigned int dirnodeid) {
+    // Seek to the directory location
+    lseek(fileDesc,sizeof(superblock) + dirnodeid * sizeof(MDS),SEEK_SET);
+    MDS dirData;
+    read(fileDesc,&dirData,sizeof(MDS));
+    // Loop through all the files and directories ignoring . and .. locations
+    unsigned int i,curId,found = 0;
+    MDS tmpData;
+    for (i = 0; i < dirData.size/sizeof(unsigned int) && !found; i++) {
+        // Get id of the current entity
+        curId = *(unsigned int*)(dirData.data.datablocks + i*sizeof(unsigned int));
+        // Seek to the current entity metadata
+        lseek(fileDesc,sizeof(superblock) + curId * sizeof(MDS),SEEK_SET);
+        // Get it's metadata
+        read(fileDesc,&tmpData,sizeof(MDS));
+        
+    }
+}*/
 
 int CFS_ModifyFileTimestamps(int fileDesc,unsigned int nodeid,int access,int modification) {
     MDS data;
@@ -366,11 +447,12 @@ void CFS_PrintFileInfo(MDS data,int options[6]) {
             case TYPE_DIRECTORY:
                 printf("dir ");
                 break;
-            case TYPE_SHORTCUT:
-                printf("link");
-                break;
             case TYPE_FILE:
                 printf("file");
+                break;
+            case TYPE_SHORTCUT:
+            case TYPE_HARDLINK:
+                printf("link");
                 break;
             default:
                 printf("    ");
@@ -465,17 +547,22 @@ void CFS_ls(int fileDesc,unsigned int nodeid,int options[6],string path) {
 }
 
 string getEntityNameFromPath(string path) {
-    string token = strtok(path,"/");
+    string pathCopy = copyString(path);
+    string token = strtok(pathCopy,"/");
     string name;
     while (token != NULL) {
         name = token;
         token = strtok(NULL,"/");
     }
+    name = copyString(name);
+    DestroyString(&pathCopy);
     return name;
 }
 
 int CFS_ImportFile(CFS cfs,string source,unsigned int nodeid) {
     // Check if file exists in cfs
+    string filename = getEntityNameFromPath(source);
+    int ret = 1;
     if (!exists(cfs->fileDesc,getEntityNameFromPath(source),nodeid)) {
         // Open linux file
         int fd = open(source,O_RDONLY);
@@ -483,7 +570,6 @@ int CFS_ImportFile(CFS cfs,string source,unsigned int nodeid) {
         unsigned int size = lseek(fd,0L,SEEK_END);
         lseek(fd,0L,SEEK_SET);
         // Check if linux file fits in cfs
-        string filename = getEntityNameFromPath(source);
         if (size <= cfs->MAX_FILE_SIZE) {
             // Linux file fits in cfs
             // Read it's content
@@ -495,15 +581,16 @@ int CFS_ImportFile(CFS cfs,string source,unsigned int nodeid) {
         } else {
             // Linux file does not fit in cfs
             printf("File %s does not fit in cfs.\n",filename);
-            return 0;
+            ret = 0;
         }
         // Close linux file
         close(fd);
     } else {
-        printf("File %s already exists\n",getEntityNameFromPath(source));
-        return 0;
+        printf("File %s already exists\n",filename);
+        ret = 0;
     }
-    return 1;
+    DestroyString(&filename);
+    return ret;
 }
 
 int CFS_ImportDirectory(CFS cfs,string source,unsigned int nodeid) {
@@ -855,7 +942,8 @@ int CFS_Run(CFS cfs) {
                 }
             } else {
                 printf("Not currently working with a cfs file.\n");
-                IgnoreRemainingInput();
+                if (!lastword)
+                    IgnoreRemainingInput();
             }
         }
         // Print files or folder contents(ls)
@@ -965,7 +1053,78 @@ int CFS_Run(CFS cfs) {
                 }
             } else {
                 printf("Not currently working with a cfs file.\n");
-                IgnoreRemainingInput();
+                if (!lastword)
+                    IgnoreRemainingInput();
+            }
+        }
+        // Create a hard link to a specific file
+        else if (!strcmp("cfs_ln",commandLabel)) {
+            // Check if we have an open file to work on
+            if (cfs->fileDesc != -1) {
+                // Usage check
+                if (!lastword) {
+                    // Read sourceFile
+                    string sourceFile = readNextWord(&lastword);
+                    string outputFile;
+                    // Usage check
+                    if (!lastword) {
+                        // Read output file
+                        outputFile = readNextWord(&lastword);
+                        // Usage check
+                        if (lastword) {
+                            // Get source file location
+                            location sourceLocation = getPathLocation(cfs->fileDesc,sourceFile,cfs->currentDirectoryId,0);
+                            // Chech if the source file exists
+                            if (sourceLocation.valid) {
+                                if (sourceLocation.type == TYPE_FILE) {
+                                    // Get output file location
+                                    string outputFileCopy = copyString(outputFile);
+                                    location outputLocation = getPathLocation(cfs->fileDesc,outputFileCopy,cfs->currentDirectoryId,1);
+                                    // Check if output location exists
+                                    if (outputLocation.valid) {
+                                        // Check if a file with the same name exists in the output directory and create the hard link only if not
+                                        if (!exists(cfs->fileDesc,outputLocation.filenanme,outputLocation.nodeid)) {
+                                            CFS_CreateHardLink(cfs->fileDesc,outputLocation.filenanme,sourceLocation.nodeid,outputLocation.nodeid);
+                                        } else {
+                                            printf("A file with the same output file name already exists in that path.\n");
+                                        }
+                                    } else {
+                                        printf("Specified output path does not exist.\n");
+                                    }
+                                    DestroyString(&outputFileCopy);
+                                } else {
+                                    printf("Specified source file is not a file.\n");
+                                }
+                            } else {
+                                printf("Specified source file does not exist.\n");
+                            }
+                        } else {
+                            printf("Usage:cfs_ln <SOURCE_FILE> <OUTPUT FILE>\n");
+                            IgnoreRemainingInput();
+                        }
+                        DestroyString(&outputFile);
+                    } else {
+                        printf("Usage:cfs_ln <SOURCE_FILE> <OUTPUT FILE>\n");
+                    }
+                    DestroyString(&sourceFile);
+                } else {
+                    printf("Usage:cfs_ln <SOURCE_FILE> <OUTPUT FILE>\n");
+                }
+            } else {
+                printf("Not currently working with a cfs file.\n");
+                if (!lastword)
+                    IgnoreRemainingInput();
+            }
+        }
+        // Remove directory with it's contents(in depth 1 or recursively) or a single file(addtional option)
+        else if (!strcmp("cfs_rm",commandLabel)) {
+            // Check if we have an open file to work on
+            if (cfs->fileDesc != -1) {
+                
+            } else {
+                printf("Not currently working with a cfs file.\n");
+                if (!lastword)
+                    IgnoreRemainingInput();
             }
         }
         // Import linux files/directories to cfs
@@ -1009,7 +1168,8 @@ int CFS_Run(CFS cfs) {
                 }
             } else {
                 printf("Not currently working with a cfs file.\n");
-                IgnoreRemainingInput();
+                if (!lastword)
+                    IgnoreRemainingInput();
             }
         }
         // Export cfs files/directories to linux fs
@@ -1048,11 +1208,12 @@ int CFS_Run(CFS cfs) {
                     }
                 } else {
                     // Nothing was specified
-                    printf("Usage:cfs_import <SOURCES> ... <DIRECTORY>\n");
+                    printf("Usage:cfs_export <SOURCES> ... <DIRECTORY>\n");
                 }
             } else {
                 printf("Not currently working with a cfs file.\n");
-                IgnoreRemainingInput();
+                if (!lastword)
+                    IgnoreRemainingInput();
             }
         }
         // Create new cfs file
