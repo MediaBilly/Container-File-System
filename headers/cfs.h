@@ -22,6 +22,7 @@ typedef struct {
 typedef struct {
     char deleted; // 1 if the entity was previously deleted and o otherwise
     char root; // 1 if root node and 0 otherwise
+    unsigned int links; // number of hard links to that file(must be 0 to be completely deleted)
     unsigned int nodeid;
     char filename[MAX_FILENAME_SIZE];
     unsigned int size;

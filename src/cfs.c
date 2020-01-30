@@ -17,8 +17,6 @@
 // Define file types
 #define TYPE_FILE 0
 #define TYPE_DIRECTORY 1
-#define TYPE_SHORTCUT 2
-#define TYPE_HARDLINK 3
 
 // Define touch option flags
 #define TOUCH_ACCESS 0
@@ -94,24 +92,19 @@ unsigned int getNodeIdFromName(int fileDesc,string name,unsigned int nodeid,int 
         unsigned int i,curId;
         MDS tmpData;
         *found = 0;
-        for (i = 0; i < data.size/sizeof(unsigned int); i++) {
+        for (i = 0; i < data.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)); i++) {
             // Get id of the current entity
-            curId = *(unsigned int*)(data.data.datablocks + i*sizeof(unsigned int));
+            curId = *(unsigned int*)(data.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)));
+            // Get name of the current entity
+            string filename = data.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) + sizeof(unsigned int);
             // Seek to the current entity metadata
             lseek(fileDesc,sizeof(superblock) + curId * sizeof(MDS),SEEK_SET);
             // Get it's metadata
             read(fileDesc,&tmpData,sizeof(MDS));
             // Check if the name matches
-            if (!strcmp(name,tmpData.filename)) {
+            if (!strcmp(name,filename)) {
                 // Found
-                *found = 1;
-                // If wanted node is shortcut return the id and type of the pointed node
-                if (tmpData.type == TYPE_SHORTCUT) {
-                    // Get pointed node metadata
-                    lseek(fileDesc,sizeof(superblock) + *(unsigned int*)(tmpData.data.datablocks)*sizeof(MDS),SEEK_SET);
-                    read(fileDesc,&tmpData,sizeof(MDS));
-                    curId = tmpData.nodeid;
-                } 
+                *found = 1; 
                 *type = tmpData.type;
                 return curId;
             }
@@ -180,74 +173,62 @@ unsigned int CFS_GetNextAvailableNodeId(int fileDesc) {
     return data.nodeid + 1;
 }
 
-unsigned int CFS_CreateShortcut(int fileDesc,string name,unsigned int nodeid,unsigned int destNodeId) {
-    MDS data;
-    // Initialize metadata bytes to 0 to avoid valgrind errors
-    memset(&data,0,sizeof(MDS));
-    // Initialize shortcut metadata
-    data.deleted = 0;
-    data.root = 0;
-    data.nodeid = CFS_GetNextAvailableNodeId(fileDesc);
-    strcpy(data.filename,name);
-    data.size = DigitsCount(destNodeId);
-    data.type = TYPE_SHORTCUT;
-    data.parent_nodeid = nodeid;
-    time_t timer = time(NULL);
-    data.creation_time = data.accessTime = data.modificationTime = timer;
-    // Set datablocks data to destination nodeid
-    memcpy(data.data.datablocks,&destNodeId,sizeof(unsigned int));
-    // Write shortcut data to cfs file
-    write(fileDesc,&data,sizeof(MDS));
-    // Write directory descriptor to node's list
-    lseek(fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
+unsigned int CFS_CreateDirectory(CFS cfs,string name,unsigned int nodeid) {
+    // Get location directory data
     MDS locationData;
-    read(fileDesc,&locationData,sizeof(MDS));
-    memcpy(locationData.data.datablocks + locationData.size,&data.nodeid,sizeof(unsigned int));
-    locationData.size += sizeof(unsigned int);
-    lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
-    write(fileDesc,&locationData,sizeof(MDS));
-    return data.nodeid;
-}
-
-unsigned int CFS_CreateDirectory(int fileDesc,string name,unsigned int nodeid) {
+    lseek(cfs->fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
+    read(cfs->fileDesc,&locationData,sizeof(MDS));
+    // Check if new directory fits
+    if (locationData.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) > cfs->MAX_DIRECTORY_FILE_NUMBER)
+        return 0;
     MDS data;
     // Initialize metadata bytes to 0 to avoid valgrind errors
     memset(&data,0,sizeof(MDS));
     // Initialize directory metadata
     data.deleted = 0;
     data.root = 0;
-    data.nodeid = CFS_GetNextAvailableNodeId(fileDesc);
+    data.links = 0;
+    data.nodeid = CFS_GetNextAvailableNodeId(cfs->fileDesc);
     strcpy(data.filename,name);
     data.size = 0;
     data.type = TYPE_DIRECTORY;
     data.parent_nodeid = nodeid;
     time_t timer = time(NULL);
     data.creation_time = data.accessTime = data.modificationTime = timer;
+    // Create . shortcut (hardlink)
+    memcpy(data.data.datablocks,&data.nodeid,sizeof(unsigned int));
+    strcpy(data.data.datablocks + sizeof(unsigned int),".");
+    // Create .. shortcut (hardlink)
+    memcpy(data.data.datablocks + sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char),&data.parent_nodeid,sizeof(unsigned int));
+    strcpy(data.data.datablocks + 2*sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char),"..");
+    data.size += 2*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char));
     // Write directory data to cfs file
-    write(fileDesc,&data,sizeof(MDS));
-    // Write directory descriptor to node's list
-    lseek(fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
-    MDS locationData;
-    read(fileDesc,&locationData,sizeof(MDS));
+    write(cfs->fileDesc,&data,sizeof(MDS));
+    // Write directory descriptor and name to node's list
     memcpy(locationData.data.datablocks + locationData.size,&data.nodeid,sizeof(unsigned int));
-    locationData.size += sizeof(unsigned int);
-    lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
-    write(fileDesc,&locationData,sizeof(MDS));
-    // Create . shortcut
-    CFS_CreateShortcut(fileDesc,".",data.nodeid,data.nodeid);
-    // Create .. shortcut
-    CFS_CreateShortcut(fileDesc,"..",data.nodeid,nodeid);
+    strcpy(locationData.data.datablocks + locationData.size + sizeof(unsigned int),name);
+    locationData.size += (sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char));
+    lseek(cfs->fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
+    write(cfs->fileDesc,&locationData,sizeof(MDS));
     return data.nodeid;
 }
 
-unsigned int CFS_CreateFile(int fileDesc,string name,unsigned int dirnodeid,char content[DATABLOCK_NUM],int size) {
+unsigned int CFS_CreateFile(CFS cfs,string name,unsigned int dirnodeid,char content[DATABLOCK_NUM],int size) {
+    // Get location directory data
+    MDS locationData;
+    lseek(cfs->fileDesc,sizeof(superblock) + dirnodeid * sizeof(MDS),SEEK_SET);
+    read(cfs->fileDesc,&locationData,sizeof(MDS));
+    // Check if new file fits
+    if (locationData.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) > cfs->MAX_DIRECTORY_FILE_NUMBER)
+        return 0;
     MDS data;
     // Initialize metadata bytes to 0 to avoid valgrind errors
     memset(&data,0,sizeof(MDS));
     // Initialize file metadata
     data.deleted = 0;
     data.root = 0;
-    data.nodeid = CFS_GetNextAvailableNodeId(fileDesc);
+    data.links = 0;
+    data.nodeid = CFS_GetNextAvailableNodeId(cfs->fileDesc);
     strcpy(data.filename,name);
     data.size = size;
     data.type = TYPE_FILE;
@@ -257,46 +238,40 @@ unsigned int CFS_CreateFile(int fileDesc,string name,unsigned int dirnodeid,char
     // Write content to datablocks
     memcpy(data.data.datablocks,content,size);
     // Write file data to cfs file
-    write(fileDesc,&data,sizeof(MDS));
-    // Write file descriptor to directory's node list
-    lseek(fileDesc,sizeof(superblock) + dirnodeid * sizeof(MDS),SEEK_SET);
-    MDS locationData;
-    read(fileDesc,&locationData,sizeof(MDS));
+    write(cfs->fileDesc,&data,sizeof(MDS));
+    // Write file descriptor and name to directory's node list
     memcpy(locationData.data.datablocks + locationData.size,&data.nodeid,sizeof(unsigned int));
-    locationData.size += sizeof(unsigned int);
-    lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
-    write(fileDesc,&locationData,sizeof(MDS));
+    strcpy(locationData.data.datablocks + locationData.size + sizeof(unsigned int),name);
+    locationData.size += (sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char));
+    lseek(cfs->fileDesc,sizeof(superblock) + dirnodeid * sizeof(MDS),SEEK_SET);
+    write(cfs->fileDesc,&locationData,sizeof(MDS));
     return data.nodeid;
 }
 
-int CFS_CreateHardLink(int fileDesc,string outputfilename,unsigned int sourcenodeid,unsigned int dirnodeid) {
-    MDS data;
-    // Initialize metadata bytes to 0 to avoid valgrind errors
-    memset(&data,0,sizeof(MDS));
-    // Initialize link metadata
-    data.deleted = 0;
-    data.root = 0;
-    data.nodeid = CFS_GetNextAvailableNodeId(fileDesc);
-    strcpy(data.filename,outputfilename);
-    data.size = sizeof(unsigned int);
-    data.type = TYPE_HARDLINK;
-    data.parent_nodeid = dirnodeid;
-    time_t timer = time(NULL);
-    data.creation_time = data.accessTime = data.modificationTime = timer;
-    // Write source node id(link to) to datablocks
-    memcpy(data.data.datablocks,&sourcenodeid,sizeof(unsigned int));
-    // Write link data to cfs file
-    write(fileDesc,&data,sizeof(MDS));
+unsigned int CFS_CreateHardLink(CFS cfs,string outputfilename,unsigned int sourcenodeid,unsigned int dirnodeid) {
     // Get parent directory data
     MDS parentData;
-    lseek(fileDesc,sizeof(superblock) + dirnodeid * sizeof(MDS),SEEK_SET);
-    read(fileDesc,&parentData,sizeof(MDS));
+    lseek(cfs->fileDesc,sizeof(superblock) + dirnodeid * sizeof(MDS),SEEK_SET);
+    read(cfs->fileDesc,&parentData,sizeof(MDS));
+    // Check if new file fits
+    if (parentData.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) > cfs->MAX_DIRECTORY_FILE_NUMBER)
+        return 0;
     // Write shortcut descriptor to parent directory's node list
-    memcpy(parentData.data.datablocks + parentData.size,&data.nodeid,sizeof(unsigned int));
-    parentData.size += sizeof(unsigned int);
-    lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
-    write(fileDesc,&parentData,sizeof(MDS));
-    return data.nodeid;
+    memcpy(parentData.data.datablocks + parentData.size,&sourcenodeid,sizeof(unsigned int));
+    strcpy(parentData.data.datablocks + parentData.size + sizeof(unsigned int),outputfilename);
+    parentData.size += (sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char));
+    lseek(cfs->fileDesc,-sizeof(MDS),SEEK_CUR);
+    write(cfs->fileDesc,&parentData,sizeof(MDS));
+    // Get source node id data
+    MDS sourceData;
+    lseek(cfs->fileDesc,sizeof(superblock) + sourcenodeid * sizeof(MDS),SEEK_SET);
+    read(cfs->fileDesc,&sourceData,sizeof(MDS));
+    // Increase source # of links
+    sourceData.links++;
+    // Write updated source data back to cfs file
+    lseek(cfs->fileDesc,-sizeof(MDS),SEEK_CUR);
+    write(cfs->fileDesc,&sourceData,sizeof(MDS));
+    return 1;
 }
 
 /*
@@ -394,12 +369,15 @@ int Create_CFS_File(string pathname,int BLOCK_SIZE,int FILENAME_SIZE,int MAX_FIL
             data.parent_nodeid = 0;
             time_t timer = time(NULL);
             data.creation_time = data.accessTime = data.modificationTime = timer;
+            // Create . shortcut (hardlink)
+            memcpy(data.data.datablocks,&data.nodeid,sizeof(unsigned int));
+            strcpy(data.data.datablocks + sizeof(unsigned int),".");
+            // Create .. shortcut (hardlink)
+            memcpy(data.data.datablocks + sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char),&data.parent_nodeid,sizeof(unsigned int));
+            strcpy(data.data.datablocks + 2*sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char),"..");
+            data.size += 2*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char));
             lseek(fd,0,SEEK_END);
             write(fd,&data,sizeof(MDS));
-            // Create . shortcut
-            CFS_CreateShortcut(fd,".",0,0);
-            // Create .. shortcut
-            CFS_CreateShortcut(fd,"..",0,0);
             // Close the file after writing data
             close(fd);
         } else {
@@ -432,7 +410,7 @@ void CFS_pwd(int fileDesc,unsigned int nodeid,int last) {
     }
 }
 
-void CFS_PrintFileInfo(MDS data,int options[6]) {
+void CFS_PrintFileInfo(int fileDesc,MDS data,string filename,int options[6]) {
     // Ignore hidden files if -a option was not specified
     if (!options[LS_ALL_FILES] && data.filename[0] == '.')
         return;
@@ -440,32 +418,38 @@ void CFS_PrintFileInfo(MDS data,int options[6]) {
     if (options[LS_DIRECTORIES_ONLY] && data.type != TYPE_DIRECTORY)
         return;
     // If -h option (only links) was specified ignore other types
-    if (options[LS_LINKS_ONLY] && data.type != TYPE_SHORTCUT)
+    if (options[LS_LINKS_ONLY] && data.links == 0)
         return;
     if (options[LS_ALL_ATTRIBUTES]) {
         switch (data.type) {
             case TYPE_DIRECTORY:
-                printf("dir ");
+                printf("dir     ");
                 break;
             case TYPE_FILE:
-                printf("file");
-                break;
-            case TYPE_SHORTCUT:
-            case TYPE_HARDLINK:
-                printf("link");
+                printf("file    ");
                 break;
             default:
-                printf("    ");
+                printf("        ");
                 break;
         }
         char creationTime[70],accessTime[70],modificationTime[70];
         strftime(creationTime,sizeof(creationTime),"%c",localtime(&data.creation_time));
         strftime(accessTime,sizeof(accessTime),"%c",localtime(&data.accessTime));
         strftime(modificationTime,sizeof(modificationTime),"%c",localtime(&data.modificationTime));
-        printf(" %s %s %s %d %s\n",creationTime,accessTime,modificationTime,data.size,data.filename);
+        printf(" %s %s %s %d %s\n",creationTime,accessTime,modificationTime,data.size,filename);
     } else {
         printf("%s ",data.filename);
     }
+}
+
+MDS getMetadataFromNodeId(int fileDesc,unsigned int nodeid) {
+    MDS data;
+    // Seek to the wanted block metadata
+    lseek(fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
+    // Get it's metadata
+    read(fileDesc,&data,sizeof(MDS));
+    // Return the metadata
+    return data;
 }
 
 void CFS_ls(int fileDesc,unsigned int nodeid,int options[6],string path) {
@@ -487,19 +471,21 @@ void CFS_ls(int fileDesc,unsigned int nodeid,int options[6],string path) {
         // In recursive directory option print the current path
         if (options[LS_RECURSIVE_PRINT])
             printf("%s:\n",path);
-        for (i = 0; i < data.size/sizeof(int); i++) {
+        for (i = 0; i < data.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)); i++) {
             // Get id of the current entity
-            curId = *(unsigned int*)(data.data.datablocks + i*sizeof(int));
+            curId = *(unsigned int*)(data.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)));
+            // Get name of the current entity
+            string filename = data.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) + sizeof(unsigned int);
             // Seek to the current entity metadata
             lseek(fileDesc,sizeof(superblock) + curId * sizeof(MDS),SEEK_SET);
             // Get it's metadata
             read(fileDesc,&tmpData,sizeof(MDS));
             // If we want ordered print store all the contents in a minheap and we will print them later
             if (!options[LS_UNORDERED]) {
-                MinHeap_Insert(fileHeap,tmpData);
+                MinHeap_Insert(fileHeap,tmpData,filename);
             } else {
                 // Otherwise just print entity info
-                CFS_PrintFileInfo(tmpData,options);
+                CFS_PrintFileInfo(fileDesc,tmpData,filename,options);
             }
         }
         // Print all the contents ordered if -u is not enabled
@@ -509,21 +495,23 @@ void CFS_ls(int fileDesc,unsigned int nodeid,int options[6],string path) {
             while (!empty){
                 tmp = MinHeap_ExtractMin(fileHeap,&empty);
                 if (!empty)
-                    CFS_PrintFileInfo(tmp,options);
+                    CFS_PrintFileInfo(fileDesc,tmp,tmp.filename,options);
             }
             MinHeap_Destroy(&fileHeap);
         }
         // In recursive print option recursively print all subfolder's contents
         if (options[LS_RECURSIVE_PRINT]) {
-            for (i = 0; i < data.size/sizeof(int); i++) {
+            for (i = 0; i < data.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)); i++) {
                 // Get id of the current entity
-                curId = *(unsigned int*)(data.data.datablocks + i*sizeof(int));
+                curId = *(unsigned int*)(data.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)));
+                // Get name of the current entity
+                string filename = data.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) + sizeof(unsigned int);
                 // Seek to the current entity metadata
                 lseek(fileDesc,sizeof(superblock) + curId * sizeof(MDS),SEEK_SET);
                 // Get it's metadata
                 read(fileDesc,&tmpData,sizeof(MDS));
-                // Recursively ls only on directories
-                if (tmpData.type == TYPE_DIRECTORY) {
+                // Recursively ls only on directories (except . and .. shortcuts to avoid infinite loop)
+                if (tmpData.type == TYPE_DIRECTORY && strcmp(".",filename) && strcmp("..",filename)) {
                     string newPath = copyString(path);
                     stringAppend(&newPath,"/");
                     stringAppend(&newPath,tmpData.filename);
@@ -532,15 +520,6 @@ void CFS_ls(int fileDesc,unsigned int nodeid,int options[6],string path) {
                 }
             }
         }
-    } else if (data.type == TYPE_SHORTCUT) {
-        // Get pointed node metadata
-        MDS destData;
-        lseek(fileDesc,sizeof(superblock) + *(unsigned int*)(data.data.datablocks)*sizeof(MDS),SEEK_SET);
-        read(fileDesc,&destData,sizeof(MDS));
-        // Print destination contents
-        CFS_ls(fileDesc,destData.nodeid,options,destData.filename);
-    } else {
-        CFS_PrintFileInfo(data,options);
     }
     if (!options[LS_ALL_ATTRIBUTES])
         printf("\n");
@@ -563,7 +542,7 @@ int CFS_ImportFile(CFS cfs,string source,unsigned int nodeid) {
     // Check if file exists in cfs
     string filename = getEntityNameFromPath(source);
     int ret = 1;
-    if (!exists(cfs->fileDesc,getEntityNameFromPath(source),nodeid)) {
+    if (!exists(cfs->fileDesc,filename,nodeid)) {
         // Open linux file
         int fd = open(source,O_RDONLY);
         // Get linux file size in bytes
@@ -577,7 +556,10 @@ int CFS_ImportFile(CFS cfs,string source,unsigned int nodeid) {
             read(fd,bytes,size);
             //printf("%s\n",bytes);
             // Create the corresponding file in cfs
-            CFS_CreateFile(cfs->fileDesc,filename,nodeid,bytes,size);
+            if (!CFS_CreateFile(cfs,filename,nodeid,bytes,size)) {
+                printf("Not enough space in cfs to import file %s\n",filename);
+                ret = 0;
+            }
         } else {
             // Linux file does not fit in cfs
             printf("File %s does not fit in cfs.\n",filename);
@@ -615,9 +597,14 @@ int CFS_ImportDirectory(CFS cfs,string source,unsigned int nodeid) {
                 // Check if corresponding directory exists
                 if (!exists(cfs->fileDesc,dirContent->d_name,nodeid)) {
                     // Create corresponding directory in cfs
-                    unsigned int dirNodeId = CFS_CreateDirectory(cfs->fileDesc,dirContent->d_name,nodeid);
-                    // Recursively import linux directory's content to cfs directory
-                    CFS_ImportDirectory(cfs,dirContentPath,dirNodeId);
+                    unsigned int dirNodeId;
+                    // Check if there is enough space for the new directory
+                    if ((dirNodeId = CFS_CreateDirectory(cfs,dirContent->d_name,nodeid)) == 0) {
+                        printf("Not enough space to create directory %s\n",dirContent->d_name);
+                    } else {
+                        // Recursively import linux directory's content to cfs directory
+                        CFS_ImportDirectory(cfs,dirContentPath,dirNodeId);
+                    }
                 } else {
                     printf("File %s already exists\n",dirContent->d_name);
                 }
@@ -658,7 +645,7 @@ int CFS_ImportSource(CFS cfs,string source,unsigned int nodeid) {
     return 1;
 }
 
-int CFS_ExportFile(CFS cfs,unsigned int nodeid,string directory) {
+int CFS_ExportFile(CFS cfs,unsigned int nodeid,string directory,string filename) {
     // Get file data
     MDS data;
     lseek(cfs->fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
@@ -666,7 +653,7 @@ int CFS_ExportFile(CFS cfs,unsigned int nodeid,string directory) {
     // Determine export path
     string path = copyString(directory);
     stringAppend(&path,"/");
-    stringAppend(&path,data.filename);
+    stringAppend(&path,filename);
     // Create file in linux and check if creation was ok
     int fd;
     if ((fd = open(path,O_CREAT|O_WRONLY|O_TRUNC,FILE_PERMISSIONS)) != -1) {
@@ -692,9 +679,14 @@ int CFS_ExportDirectory(CFS cfs,unsigned int nodeid,string directory) {
     unsigned int i,curId;
     MDS tmpData;
     string path;
-    for (i = 0; i < data.size/sizeof(int); i++) {
+    for (i = 0; i < data.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)); i++) {
         // Get id of the current entity
-        curId = *(unsigned int*)(data.data.datablocks + i*sizeof(int));
+        curId = *(unsigned int*)(data.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)));
+        // Get name of the current entity
+        string filename = data.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) + sizeof(unsigned int);
+        // Ignore . and .. shortcuts to avoid infinite loop
+        if (!strcmp(".",filename) || !strcmp("..",filename))
+            continue;
         // Seek to the current entity metadata
         lseek(cfs->fileDesc,sizeof(superblock) + curId * sizeof(MDS),SEEK_SET);
         // Get it's metadata
@@ -712,7 +704,7 @@ int CFS_ExportDirectory(CFS cfs,unsigned int nodeid,string directory) {
             DestroyString(&path);
         } else if (tmpData.type == TYPE_FILE) {
             // Regular file
-            CFS_ExportFile(cfs,tmpData.nodeid,directory);
+            CFS_ExportFile(cfs,tmpData.nodeid,directory,filename);
         }
     }
     return 1;
@@ -722,7 +714,6 @@ int CFS_ExportSource(CFS cfs,string source,string directory) {
     // Get source location
     string sourceBackup = copyString(source);
     location loc = getPathLocation(cfs->fileDesc,sourceBackup,cfs->currentDirectoryId,0);
-    DestroyString(&sourceBackup);
     // Check if it exists
     if (loc.valid) {
         // Check source type (shortcuts are not exported)
@@ -731,11 +722,12 @@ int CFS_ExportSource(CFS cfs,string source,string directory) {
             CFS_ExportDirectory(cfs,loc.nodeid,directory);
         } else if (loc.type == TYPE_FILE) {
             // Regular file
-            CFS_ExportFile(cfs,loc.nodeid,directory);
+            CFS_ExportFile(cfs,loc.nodeid,directory,loc.filenanme);
         }
     } else {
         printf("%s not found.\n",source);
     }
+    DestroyString(&sourceBackup);
     return 1;
 }
 
@@ -801,7 +793,9 @@ int CFS_Run(CFS cfs) {
                             // Check if path exists
                             if (loc.valid) {
                                 // Path exists so create the new directory there
-                                CFS_CreateDirectory(cfs->fileDesc,loc.filenanme,loc.nodeid);
+                                if (!CFS_CreateDirectory(cfs,loc.filenanme,loc.nodeid)) {
+                                    printf("Not enough space to create directory %s\n",loc.filenanme);
+                                }
                             } else {
                                 // Path does not exist so throw an error
                                 printf("No such file or directory.\n");
@@ -872,7 +866,9 @@ int CFS_Run(CFS cfs) {
                                 // Check if path exists
                                 if (loc.valid) {
                                     // Path exists so create the new file there
-                                    CFS_CreateFile(cfs->fileDesc,loc.filenanme,loc.nodeid,"",0);
+                                    if (!CFS_CreateFile(cfs,loc.filenanme,loc.nodeid,"",0)) {
+                                        printf("Not enough space to create file %s\n",loc.filenanme);
+                                    }
                                 } else {
                                     // Path does not exist so throw an error
                                     printf("No such file or directory.\n");
@@ -1007,7 +1003,10 @@ int CFS_Run(CFS cfs) {
                                     pathCopy = copyString(path);
                                     loc = getPathLocation(cfs->fileDesc,path,cfs->currentDirectoryId,0);
                                     if (loc.valid) {
-                                        CFS_ls(cfs->fileDesc,loc.nodeid,options,pathCopy);
+                                        if (loc.type == TYPE_DIRECTORY)
+                                            CFS_ls(cfs->fileDesc,loc.nodeid,options,pathCopy);
+                                        else
+                                            CFS_PrintFileInfo(cfs->fileDesc,getMetadataFromNodeId(cfs->fileDesc,loc.nodeid),loc.filenanme,options);
                                     } else {
                                         printf("No such file or directory.\n");
                                     }
@@ -1032,7 +1031,10 @@ int CFS_Run(CFS cfs) {
                                 pathCopy = copyString(path);
                                 loc = getPathLocation(cfs->fileDesc,option,cfs->currentDirectoryId,0);
                                 if (loc.valid) {
-                                    CFS_ls(cfs->fileDesc,loc.nodeid,options,pathCopy);
+                                    if (loc.type == TYPE_DIRECTORY)
+                                        CFS_ls(cfs->fileDesc,loc.nodeid,options,pathCopy);
+                                    else
+                                        CFS_PrintFileInfo(cfs->fileDesc,getMetadataFromNodeId(cfs->fileDesc,loc.nodeid),loc.filenanme,options);
                                 } else {
                                     printf("No such file or directory.\n");
                                 }
@@ -1084,7 +1086,9 @@ int CFS_Run(CFS cfs) {
                                     if (outputLocation.valid) {
                                         // Check if a file with the same name exists in the output directory and create the hard link only if not
                                         if (!exists(cfs->fileDesc,outputLocation.filenanme,outputLocation.nodeid)) {
-                                            CFS_CreateHardLink(cfs->fileDesc,outputLocation.filenanme,sourceLocation.nodeid,outputLocation.nodeid);
+                                            if (!CFS_CreateHardLink(cfs,outputLocation.filenanme,sourceLocation.nodeid,outputLocation.nodeid)) {
+                                                printf("Not enough space to create hardlink %s\n",outputLocation.filenanme);
+                                            }
                                         } else {
                                             printf("A file with the same output file name already exists in that path.\n");
                                         }
@@ -1160,7 +1164,7 @@ int CFS_Run(CFS cfs) {
                         Queue_Destroy(&sourcesQueue);
                     } else {
                         // Not a directory
-                        printf("No such directory %s.\n",directory);
+                        printf("No such directory %s\n",directory);
                     }
                 } else {
                     // Nothing was specified
@@ -1225,7 +1229,7 @@ int CFS_Run(CFS cfs) {
                 // Read first option or file
                 option = readNextWord(&lastword);
                 int ok = 1;
-                int BLOCK_SIZE = sizeof(char),FILENAME_SIZE = MAX_FILENAME_SIZE,MAX_FILE_SIZE = DATABLOCK_NUM,MAX_DIRECTORY_FILE_NUMBER = 50;
+                int BLOCK_SIZE = sizeof(char),FILENAME_SIZE = MAX_FILENAME_SIZE,MAX_FILE_SIZE = DATABLOCK_NUM,MAX_DIRECTORY_FILE_NUMBER = sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char);
                 while (option[0] == '-') {
                     // Check if option argument was not specified
                     if (lastword) {

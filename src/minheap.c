@@ -40,11 +40,12 @@ MDS MinHeap_FindMin(MinHeap heap)
     return heap->Arr[0];
 }
 
-int MinHeap_Insert(MinHeap heap,MDS value)
+int MinHeap_Insert(MinHeap heap,MDS value,string filename)
 {
     // No more elements fit
     if (heap->last == heap->size)
         return 0;
+    strcpy(value.filename,filename);
     // Insert to the last element position
     int i = heap->last++;
     int parent = (i-1) >> 1;
