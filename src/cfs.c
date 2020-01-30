@@ -178,7 +178,7 @@ unsigned int CFS_CreateDirectory(CFS cfs,string name,unsigned int nodeid) {
     MDS locationData;
     lseek(cfs->fileDesc,sizeof(superblock) + nodeid * sizeof(MDS),SEEK_SET);
     read(cfs->fileDesc,&locationData,sizeof(MDS));
-    // Check if new directory fits
+    // Check if new directory fits in directory
     if (locationData.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) > cfs->MAX_DIRECTORY_FILE_NUMBER)
         return 0;
     MDS data;
@@ -218,7 +218,7 @@ unsigned int CFS_CreateFile(CFS cfs,string name,unsigned int dirnodeid,char cont
     MDS locationData;
     lseek(cfs->fileDesc,sizeof(superblock) + dirnodeid * sizeof(MDS),SEEK_SET);
     read(cfs->fileDesc,&locationData,sizeof(MDS));
-    // Check if new file fits
+    // Check if new file fits in directory
     if (locationData.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) > cfs->MAX_DIRECTORY_FILE_NUMBER)
         return 0;
     MDS data;
@@ -253,7 +253,7 @@ unsigned int CFS_CreateHardLink(CFS cfs,string outputfilename,unsigned int sourc
     MDS parentData;
     lseek(cfs->fileDesc,sizeof(superblock) + dirnodeid * sizeof(MDS),SEEK_SET);
     read(cfs->fileDesc,&parentData,sizeof(MDS));
-    // Check if new file fits
+    // Check if new link fits in directory
     if (parentData.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) > cfs->MAX_DIRECTORY_FILE_NUMBER)
         return 0;
     // Write shortcut descriptor to parent directory's node list
@@ -346,7 +346,7 @@ int CFS_ModifyFileTimestamps(int fileDesc,unsigned int nodeid,int access,int mod
 int Create_CFS_File(string pathname,int BLOCK_SIZE,int FILENAME_SIZE,int MAX_FILE_SIZE,int MAX_DIRECTORY_FILE_NUMBER) {
     int fd = -1;
     // Check if sizes satisfy constraints
-    if (MAX_FILE_SIZE <= DATABLOCK_NUM && FILENAME_SIZE <= MAX_FILENAME_SIZE && MAX_DIRECTORY_FILE_NUMBER <= MAX_FILE_SIZE/sizeof(unsigned int) && BLOCK_SIZE <= MAX_FILE_SIZE) {
+    if (MAX_FILE_SIZE <= DATABLOCK_NUM && FILENAME_SIZE <= MAX_FILENAME_SIZE && MAX_DIRECTORY_FILE_NUMBER <= MAX_FILE_SIZE/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) && BLOCK_SIZE <= MAX_FILE_SIZE) {
         // Create the file
         fd = open(pathname,O_RDWR|O_CREAT|O_TRUNC,FILE_PERMISSIONS);
         // Check if creation was successful
@@ -1052,6 +1052,103 @@ int CFS_Run(CFS cfs) {
                     // No parameters specified so list the current directory
                     int options[6] = {0,0,0,0,0,0}; // Default options
                     CFS_ls(cfs->fileDesc,cfs->currentDirectoryId,options,".");
+                }
+            } else {
+                printf("Not currently working with a cfs file.\n");
+                if (!lastword)
+                    IgnoreRemainingInput();
+            }
+        }
+        // Merge multiple files to one
+        else if (!strcmp("cfs_cat",commandLabel)) {
+            // Check if we have an open file to work on
+            if (cfs->fileDesc != -1) {
+                // Usage check
+                if (!lastword) {
+                    // Read source files
+                    Queue sourcesQueue;
+                    Queue_Create(&sourcesQueue);
+                    string source = readNextWord(&lastword);
+                    unsigned int sources = 0;
+                    while (!lastword && strcmp("-o",source)) {
+                        Queue_Push(sourcesQueue,source);
+                        DestroyString(&source);
+                        source = readNextWord(&lastword);
+                        sources++;
+                    }
+                    DestroyString(&source);
+                    // Usage check
+                    if (sources > 0) {
+                        // Usage check:check if output file was specified
+                        if (!lastword) {
+                            string outputFile = readNextWord(&lastword);
+                            // Usage check
+                            if (lastword) {
+                                location loc;
+                                unsigned int totalSize = 0,ok = 1;
+                                char datablocks[DATABLOCK_NUM];
+                                string sourceBackup;
+                                MDS sourceData;
+                                // Concatinate all source files to output file
+                                while (ok && !Queue_Empty(sourcesQueue)) {
+                                    source = Queue_Pop(sourcesQueue);
+                                    sourceBackup = copyString(source);
+                                    // Get source location and check if it exists and is a regular file
+                                    loc = getPathLocation(cfs->fileDesc,sourceBackup,cfs->currentDirectoryId,0);
+                                    if (loc.valid) {
+                                        if (loc.type == TYPE_FILE) {
+                                            // Get source data
+                                            sourceData = getMetadataFromNodeId(cfs->fileDesc,loc.nodeid);
+                                            // Check if it fits in the curren concatinated file
+                                            if (totalSize + sourceData.size <= cfs->MAX_FILE_SIZE) {
+                                                memcpy(datablocks + totalSize,sourceData.data.datablocks,sourceData.size);
+                                                totalSize += sourceData.size;
+                                            } else {
+                                                printf("%s cannot be concatinated to %s with the previous sources due to insufficient size in cfs.\n",source,outputFile);
+                                                ok = 0;
+                                            }
+                                        } else {
+                                            printf("%s not a file.\n",source);
+                                        }
+                                    } else {
+                                        printf("File %s does not exist.\n",source);
+                                    }
+                                    DestroyString(&sourceBackup);
+                                    DestroyString(&source);
+                                }
+                                // If there is enough space create the file
+                                if (ok) {
+                                    string outputFileCopy = copyString(outputFile);
+                                    location outputFileLocation = getPathLocation(cfs->fileDesc,outputFileCopy,cfs->currentDirectoryId,1);
+                                    // Check if output file location exists
+                                    if (outputFileLocation.valid) {
+                                        // Check if output file exists
+                                        if (!exists(cfs->fileDesc,outputFileLocation.filenanme,outputFileLocation.nodeid)) {
+                                            CFS_CreateFile(cfs,outputFileLocation.filenanme,outputFileLocation.nodeid,datablocks,totalSize);
+                                        } else {
+                                            printf("%s already exists.\n",outputFile);
+                                        }
+                                    } else {
+                                        printf("Output directory does not exists.\n");
+                                    }
+                                    DestroyString(&outputFile);
+                                }
+                            } else {
+                                printf("Usage:cfs_cat <SOURCE_FILES> -o <OUTPUT_FILE>\n");
+                                IgnoreRemainingInput();
+                            }
+                            DestroyString(&outputFile);
+                        } else {
+                            printf("Usage:cfs_cat <SOURCE_FILES> -o <OUTPUT_FILE>\n");
+                        }
+                    } else {
+                        printf("Usage:cfs_cat <SOURCE_FILES> -o <OUTPUT_FILE>\n");
+                        if (!lastword)
+                            IgnoreRemainingInput();
+                    }
+                    Queue_Destroy(&sourcesQueue);
+                } else {
+                    printf("Usage:cfs_cat <SOURCE_FILES> -o <OUTPUT_FILE>\n");
                 }
             } else {
                 printf("Not currently working with a cfs file.\n");
