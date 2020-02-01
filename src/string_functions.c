@@ -72,6 +72,13 @@ void DestroyString(string *str) {
     }
 }
 
+char getPromptAnswer() {
+    char ans = getchar();
+    if (ans != '\n')
+        IgnoreRemainingInput();
+    return ans;
+}
+
 void IgnoreRemainingInput() {
     while (getchar() != '\n');
 }

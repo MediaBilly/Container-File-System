@@ -30,6 +30,10 @@
 #define LS_DIRECTORIES_ONLY 4
 #define LS_LINKS_ONLY 5
 
+// Define rm option flags
+#define RM_PROMPT 0
+#define RM_RECURSIVE 1
+
 // CFS structure definition
 struct cfs {
     int fileDesc; // File descriptor of currently working cfs file
@@ -166,8 +170,10 @@ unsigned int CFS_GetNextAvailableNodeId(int fileDesc) {
     while (read(fileDesc,&tmpData,sizeof(MDS)) != 0) {
         data = tmpData;
         // Hole found
-        if (data.deleted)
+        if (data.deleted) {
+            lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
             return data.nodeid;
+        }
     }
     // End of file reached so new node will be placed there
     return data.nodeid + 1;
@@ -274,7 +280,6 @@ unsigned int CFS_CreateHardLink(CFS cfs,string outputfilename,unsigned int sourc
     return 1;
 }
 
-/*
 // Determines whether a directory is empty or not
 int CFS_DirectoryIsEmpty(int fileDesc,unsigned int nodeId) {
     //Get directory data
@@ -282,11 +287,12 @@ int CFS_DirectoryIsEmpty(int fileDesc,unsigned int nodeId) {
     lseek(fileDesc,sizeof(superblock) + nodeId * sizeof(MDS),SEEK_SET);
     read(fileDesc,&data,sizeof(MDS));
     // A cfs directory is empty only when it's only contents are . and .. shortcuts
-    return data.type == TYPE_DIRECTORY && data.size == 2*sizeof(unsigned int);
+    return data.type == TYPE_DIRECTORY && data.size == 2*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char));
 }
 
-int CFS_RemoveEntity(int fileDesc,string name,unsigned int nodeId) {
-    // Ignore root directory
+// Decreases link count or marks node as deleted
+int CFS_RemoveEntity(int fileDesc,unsigned int nodeId) {
+    // Cannot remove root directory
     if (nodeId == 0) {
         return 0;
     }
@@ -294,35 +300,87 @@ int CFS_RemoveEntity(int fileDesc,string name,unsigned int nodeId) {
     lseek(fileDesc,sizeof(superblock) + nodeId * sizeof(MDS),SEEK_SET);
     MDS data;
     read(fileDesc,&data,sizeof(MDS));
-    // Mark as deleted
-
-    // Get parent directory data
-    MDS parentData;
-    lseek(fileDesc,sizeof(superblock) + data.parent_nodeid,SEEK_SET);
-    read(fileDesc,&parentData,sizeof(MDS));
-    // Write last content in parent directory
-    
+    // If node is linked into 1 file mark it as deleted
+    if (data.links == 0)
+        data.deleted = 1;
+    // If the node is hard-linked into more than 1 names decrease the links number
+    else
+        data.links--;
+    // Write updated data to cfs
+    lseek(fileDesc,-sizeof(MDS),SEEK_CUR);
+    write(fileDesc,&data,sizeof(MDS));
     return 1;
 }
 
-int CFS_RemoveDirectoryContent(int fileDesc,unsigned int dirnodeid) {
+int CFS_RemoveDirectoryContent(int fileDesc,unsigned int dirnodeid,int options[2]) {
     // Seek to the directory location
     lseek(fileDesc,sizeof(superblock) + dirnodeid * sizeof(MDS),SEEK_SET);
     MDS dirData;
     read(fileDesc,&dirData,sizeof(MDS));
     // Loop through all the files and directories ignoring . and .. locations
-    unsigned int i,curId,found = 0;
+    unsigned int i,curId,delete,deletions = 0;
     MDS tmpData;
-    for (i = 0; i < dirData.size/sizeof(unsigned int) && !found; i++) {
+    for (i = 0; i < dirData.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char));) {
+        delete = 0;
         // Get id of the current entity
-        curId = *(unsigned int*)(dirData.data.datablocks + i*sizeof(unsigned int));
+        curId = *(unsigned int*)(dirData.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)));
+        // Get name of the current entity
+        string filename = dirData.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) + sizeof(unsigned int);
+        // Ignore . and .. directories to avoid glitches and possible infinite loop
+        if (!strcmp(".",filename) || !strcmp("..",filename)) {
+            i++;
+            continue;
+        }
         // Seek to the current entity metadata
         lseek(fileDesc,sizeof(superblock) + curId * sizeof(MDS),SEEK_SET);
         // Get it's metadata
         read(fileDesc,&tmpData,sizeof(MDS));
-        
+        // Determine type
+        if (tmpData.type == TYPE_DIRECTORY) {
+            // Directory so remove empty sub-directories and if -r option is enabled remove content from non empty sub-directories
+            if (CFS_DirectoryIsEmpty(fileDesc,curId)) {
+                CFS_RemoveEntity(fileDesc,curId);
+                delete = 1;
+            } else {
+                if (options[RM_RECURSIVE]) {
+                    CFS_RemoveDirectoryContent(fileDesc,curId,options);
+                }
+            }
+        } else if (tmpData.type == TYPE_FILE) {
+            CFS_RemoveEntity(fileDesc,curId);
+            delete = 1;
+        }
+        // If entity was deleted move the next (id,name) tuples 1 place left
+        if (delete) {
+            // If prompt(-i option) is enabled ask the user before deleting
+            char answer;
+            if (options[RM_PROMPT]) {
+                do {
+                    printf("Remove '%s'?(y/n)",filename);
+                    answer = getPromptAnswer();
+                } while (answer != 'n' && answer != 'y');
+            } else {
+                answer = 'y';
+            }
+            if (answer == 'y') {
+                if (i < dirData.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) - 1)
+                    memcpy(dirData.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)),dirData.data.datablocks + (i+1)*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)),(dirData.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) - i - 1)*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)));
+                dirData.size -= (sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char));
+                deletions++;
+            } else {
+                i++;
+            }
+        } else {
+            i++;
+        }
     }
-}*/
+    // Write changes (if any occured) to cfs file
+    if (deletions) {
+        lseek(fileDesc,sizeof(superblock) + dirnodeid * sizeof(MDS),SEEK_SET);
+        write(fileDesc,&dirData,sizeof(MDS));
+    }
+    return 1;
+}
 
 int CFS_ModifyFileTimestamps(int fileDesc,unsigned int nodeid,int access,int modification) {
     MDS data;
@@ -423,13 +481,13 @@ void CFS_PrintFileInfo(int fileDesc,MDS data,string filename,int options[6]) {
     if (options[LS_ALL_ATTRIBUTES]) {
         switch (data.type) {
             case TYPE_DIRECTORY:
-                printf("dir     ");
+                printf("dir ");
                 break;
             case TYPE_FILE:
-                printf("file    ");
+                printf("file");
                 break;
             default:
-                printf("        ");
+                printf("    ");
                 break;
         }
         char creationTime[70],accessTime[70],modificationTime[70];
@@ -979,8 +1037,9 @@ int CFS_Run(CFS cfs) {
                                 options[LS_LINKS_ONLY] = 1;
                             }
                         } else {
-                            printf("Wrong option\n");
-                            IgnoreRemainingInput();
+                            printf("Wrong option %s\n",option);
+                            if (!lastword)
+                                IgnoreRemainingInput();
                             ok = 0;
                         }
                         if (ok)
@@ -1109,9 +1168,11 @@ int CFS_Run(CFS cfs) {
                                             }
                                         } else {
                                             printf("%s not a file.\n",source);
+                                            ok = 0;
                                         }
                                     } else {
                                         printf("File %s does not exist.\n",source);
+                                        ok = 0;
                                     }
                                     DestroyString(&sourceBackup);
                                     DestroyString(&source);
@@ -1221,7 +1282,91 @@ int CFS_Run(CFS cfs) {
         else if (!strcmp("cfs_rm",commandLabel)) {
             // Check if we have an open file to work on
             if (cfs->fileDesc != -1) {
-                
+                // Usage check
+                if (!lastword) {
+                    // Read options
+                    string option = readNextWord(&lastword);
+                    int options[2] = {0,0};
+                    unsigned int optionsCount = 0,ok = 1,lastwasoption = 0;
+                    while (!lastword && ok && option[0] == '-') {
+                        if (!strcmp("-i",option)) {
+                            options[RM_PROMPT] = 1;
+                        } else if (!strcmp("-r",option)) {
+                            options[RM_RECURSIVE] = 1;
+                        } else {
+                            printf("Wrong option %s\n",option);
+                            ok = 0;
+                            if (!lastword)
+                                IgnoreRemainingInput();
+                        }
+                        if (ok)
+                            optionsCount++;
+                        if (!ok || lastword) {
+                            lastwasoption = 1;
+                            break;
+                        } else {
+                            DestroyString(&option);
+                            option = readNextWord(&lastword);
+                        }
+                    }
+                    if (ok) {
+                        if (optionsCount) {
+                            if (!lastwasoption) {
+                                string destination = option,destinationCopy;
+                                // Read directories
+                                location loc;
+                                while (1) {
+                                    destinationCopy = copyString(destination);
+                                    loc = getPathLocation(cfs->fileDesc,destinationCopy,cfs->currentDirectoryId,0);
+                                    if (loc.valid) {
+                                        if (loc.type == TYPE_DIRECTORY)
+                                            CFS_RemoveDirectoryContent(cfs->fileDesc,loc.nodeid,options);
+                                        else
+                                            printf("%s not a directory.\n",destination);
+                                    } else {
+                                        printf("No such file or directory.\n");
+                                    }
+                                    DestroyString(&destinationCopy);
+                                    DestroyString(&destination);
+                                    if (!lastword) {
+                                        destination = readNextWord(&lastword);
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            } else {
+                                // Only options = wrong usage
+                                printf("Usage:cfs_rm <OPTIONS> <DESTINATIONS>\n");
+                            }
+                        } else {
+                            // Only directories were specified
+                            string destination = option,destinationCopy;
+                            // Read directories
+                            location loc;
+                            while (1) {
+                                destinationCopy = copyString(destination);
+                                loc = getPathLocation(cfs->fileDesc,destinationCopy,cfs->currentDirectoryId,0);
+                                if (loc.valid) {
+                                    if (loc.type == TYPE_DIRECTORY)
+                                        CFS_RemoveDirectoryContent(cfs->fileDesc,loc.nodeid,options);
+                                    else
+                                        printf("%s not a directory.\n",destination);
+                                } else {
+                                    printf("No such file or directory.\n");
+                                }
+                                DestroyString(&destinationCopy);
+                                DestroyString(&destination);
+                                if (!lastword) {
+                                    destination = readNextWord(&lastword);
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    printf("Usage:cfs_rm <OPTIONS> <DESTINATIONS>\n");
+                }
             } else {
                 printf("Not currently working with a cfs file.\n");
                 if (!lastword)
