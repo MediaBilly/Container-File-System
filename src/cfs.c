@@ -1395,7 +1395,7 @@ int CFS_Run(CFS cfs) {
                                             // Copy all sources to destination
                                             string pathCopy;
                                             location loc;
-                                            while (sourceCount > 1) {
+                                            while (sourceCount > 0) {
                                                 // Extract source from queue
                                                 path = Queue_Pop(sourcesQueue);
                                                 pathCopy = copyString(path);
@@ -1749,7 +1749,7 @@ int CFS_Run(CFS cfs) {
                                             // Copy all sources to destination
                                             string pathCopy;
                                             location loc;
-                                            while (sourceCount > 1) {
+                                            while (sourceCount > 0) {
                                                 // Extract source from queue
                                                 path = Queue_Pop(sourcesQueue);
                                                 pathCopy = copyString(path);
