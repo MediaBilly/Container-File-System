@@ -65,15 +65,6 @@ typedef struct {
     unsigned int type;
 } location;
 
-int DigitsCount(int num) {
-    int digits = 0;
-    while (num > 0) {
-        digits++;
-        num /= 10;
-    }
-    return digits;
-}
-
 int CFS_Init(CFS *cfs) {
     // Initialize cfs structure
     if ((*cfs = malloc(sizeof(struct cfs))) == NULL) {
@@ -160,9 +151,11 @@ location getPathLocation(int fileDesc,string path,unsigned int nodeid,int ignore
             }
             break;
         } else {
-            ret.nodeid = nodeid;
             ret.valid = 1;
             entityName = strtok(NULL,"/");
+            if (!(ignoreLastEntity && entityName == NULL)) {
+                ret.nodeid = nodeid;
+            }
         }
     }
     return ret;
@@ -672,25 +665,118 @@ void CFS_CopyDirectoryContents(CFS cfs,unsigned int sourceDirNodeId,unsigned int
                     // Recursively copy only with -r option
                     if (options[CP_RECURSIVELY_COPY_DIRECTORIES]) {
                         unsigned int newDirId = CFS_CreateDirectory(cfs,filename,destDirNodeId);
-                        char answer;
-                        // If -i option is enabled ask the user before copying
-                        if (options[CP_PROMPT]) {
-                            do {
-                                printf("Copy '%s'?(y/n)",filename);
-                                answer = getPromptAnswer();
-                            } while (answer != 'n' && answer != 'y');
+                        if (newDirId != 0) {
+                            char answer;
+                            // If -i option is enabled ask the user before copying
+                            if (options[CP_PROMPT]) {
+                                do {
+                                    printf("Copy '%s'?(y/n)",filename);
+                                    answer = getPromptAnswer();
+                                } while (answer != 'n' && answer != 'y');
+                            } else {
+                                answer = 'y';
+                            }
+                            if (answer == 'y')
+                                CFS_CopyDirectoryContents(cfs,curId,newDirId,options);
                         } else {
-                            answer = 'y';
+                            printf("Not enough space for new directory\n");
+                            return;
                         }
-                        if (answer == 'y')
-                            CFS_CopyDirectoryContents(cfs,curId,newDirId,options);
                     }
                 }
             } else if (tmpData.type == TYPE_FILE) {
-                CFS_CopyFile(cfs,curId,destDirNodeId,filename,options[CP_PROMPT]);
+                if(!CFS_CopyFile(cfs,curId,destDirNodeId,filename,options[CP_PROMPT]))
+                    printf("Not enough space to copy file %s\n",filename);
             }
         }
     }
+}
+
+int CFS_MoveSource(CFS cfs,unsigned int sourcedirid,string sourcename,unsigned int destDirId,string destname,int prompt) {
+    char answer;
+    // If -i option is enabled ask the user before copying
+    if (prompt) {
+        do {
+            printf("Move '%s'?(y/n)",sourcename);
+            answer = getPromptAnswer();
+        } while (answer != 'n' && answer != 'y');
+    } else {
+        answer = 'y';
+    }
+    if (answer == 'y') {
+        // Get source node data
+        MDS sourceDirdata;
+        // Seek to the current block metadata
+        lseek(cfs->fileDesc,sizeof(superblock) + sourcedirid * sizeof(MDS),SEEK_SET);
+        // Get it's metadata
+        read(cfs->fileDesc,&sourceDirdata,sizeof(MDS));
+        // Search all the entities until we find the id of the wanted one
+        unsigned int i,curId;
+        MDS tmpData;
+        for (i = 0; i < sourceDirdata.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)); i++) {
+            // Get id of the current entity
+            curId = *(unsigned int*)(sourceDirdata.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)));
+            // Get name of the current entity
+            string filename = sourceDirdata.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) + sizeof(unsigned int);
+            // Seek to the current entity metadata
+            lseek(cfs->fileDesc,sizeof(superblock) + curId * sizeof(MDS),SEEK_SET);
+            // Get it's metadata
+            read(cfs->fileDesc,&tmpData,sizeof(MDS));
+            // Check if the name matches
+            if (!strcmp(sourcename,filename)) {
+                // Found
+                // Get destination directory data
+                MDS destinationDirData;
+                lseek(cfs->fileDesc,sizeof(superblock) + destDirId * sizeof(MDS),SEEK_SET);
+                read(cfs->fileDesc,&destinationDirData,sizeof(MDS));
+                // Check if destination directory is the same with the source one
+                if (destDirId != sourcedirid) {
+                    // Check if there is enough space to copy the entity there
+                    if (destinationDirData.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) <= cfs->MAX_DIRECTORY_FILE_NUMBER) {
+                        // Copy nodeid to destination directory
+                        memcpy(destinationDirData.data.datablocks + destinationDirData.size,&curId,sizeof(unsigned int));
+                        // Copy destination name to destination directory
+                        strcpy(destinationDirData.data.datablocks + destinationDirData.size + sizeof(unsigned int),destname);
+                        // Increase destination size
+                        destinationDirData.size += (sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char));
+                        // Remove (nodeid,name) tuple from source directory
+                        if (i < sourceDirdata.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) - 1)
+                            memcpy(sourceDirdata.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)),sourceDirdata.data.datablocks + (i+1)*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)),(sourceDirdata.size/(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) - i - 1)*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)));
+                        // Decrease source directory size
+                        sourceDirdata.size -= (sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char));
+                        // If source is directory change it's parent to the new directory
+                        if (tmpData.type == TYPE_DIRECTORY) {
+                            // Change parent in metadata
+                            tmpData.parent_nodeid = destDirId;
+                            // Change .. hardlink
+                            memcpy(tmpData.data.datablocks + sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char),&destDirId,sizeof(unsigned int));
+                            // Write updated data back to cfs
+                            lseek(cfs->fileDesc,sizeof(superblock) + curId * sizeof(MDS),SEEK_SET);
+                            write(cfs->fileDesc,&tmpData,sizeof(MDS));
+                        }
+                        // Write updated destination data back to cfs
+                        lseek(cfs->fileDesc,sizeof(superblock) + destDirId * sizeof(MDS),SEEK_SET);
+                        write(cfs->fileDesc,&destinationDirData,sizeof(MDS));
+                        // Write updated source data back to cfs
+                        lseek(cfs->fileDesc,sizeof(superblock) + sourcedirid * sizeof(MDS),SEEK_SET);
+                        write(cfs->fileDesc,&sourceDirdata,sizeof(MDS));
+                        return 1;
+                    } else {
+                        printf("Not enough space to move %s in new directory\n",sourcename);
+                        return 0;
+                    }
+                } else {
+                    // Destination directory is the same with the source one so simply rename the file
+                    strcpy(sourceDirdata.data.datablocks + i*(sizeof(unsigned int) + MAX_FILENAME_SIZE*sizeof(char)) + sizeof(unsigned int),destname);
+                    // Write updated source data back to cfs
+                    lseek(cfs->fileDesc,sizeof(superblock) + sourcedirid * sizeof(MDS),SEEK_SET);
+                    write(cfs->fileDesc,&sourceDirdata,sizeof(MDS));
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
 }
 
 string getEntityNameFromPath(string path) {
@@ -912,16 +998,18 @@ int CFS_Run(CFS cfs) {
         if (!strcmp("cfs_workwith",commandLabel)) {
             // Check if it was specified
             if (!lastword) {
-                // Close previous open cfs file if exists
-                if (cfs->fileDesc != -1) {
-                    close(cfs->fileDesc);
-                }
+                // Keep previous file descriptor
+                int prevDesc = cfs->fileDesc;
                 // Read filename
                 string file = readNextWord(&lastword);
                 // Check if file exists
                 if ((cfs->fileDesc = open(file,O_RDWR,FILE_PERMISSIONS)) < 0) {
                     printf("File %s does not exist\n",file);
+                    cfs->fileDesc = prevDesc;
                 } else {
+                    // Close previous file descriptor if there is one
+                    if (prevDesc != -1)
+                        close(prevDesc);
                     // File exists so open it
                     strcpy(cfs->currentFile,file);
                     // Set current directory to root (/)
@@ -1323,7 +1411,8 @@ int CFS_Run(CFS cfs) {
                                                             printf("%s is a directory so -R or -r option is required.\n",path);
                                                         }
                                                     } else if (loc.type == TYPE_FILE) {
-                                                        CFS_CopyFile(cfs,loc.nodeid,destinationLocation.nodeid,loc.filenanme,options[CP_PROMPT]);
+                                                        if(!CFS_CopyFile(cfs,loc.nodeid,destinationLocation.nodeid,loc.filenanme,options[CP_PROMPT]))
+                                                            printf("Not enough space to copy file %s\n",loc.filenanme);
                                                     }
                                                 } else {
                                                     printf("No such file or directory %s\n",path);
@@ -1370,7 +1459,8 @@ int CFS_Run(CFS cfs) {
                                                 // Determine destination type
                                                 if (destinationLocation.type == TYPE_DIRECTORY) {
                                                     // Directory so just copy source file there
-                                                    CFS_CopyFile(cfs,sourceLocation.nodeid,destinationLocation.nodeid,sourceLocation.filenanme,options[CP_PROMPT]);
+                                                    if(!CFS_CopyFile(cfs,sourceLocation.nodeid,destinationLocation.nodeid,sourceLocation.filenanme,options[CP_PROMPT]))
+                                                        printf("Not enough space to copy file %s\n",sourceLocation.filenanme);
                                                 } else {
                                                     // File so modify it with new content
                                                     MDS sourceData = getMetadataFromNodeId(cfs->fileDesc,sourceLocation.nodeid);
@@ -1388,12 +1478,16 @@ int CFS_Run(CFS cfs) {
                                                     if (sourceLocation.type == TYPE_DIRECTORY) {
                                                         if (options[CP_COPY_DIRECTORY_CONTENT] || options[CP_RECURSIVELY_COPY_DIRECTORIES]) {
                                                             unsigned int newDirId = CFS_CreateDirectory(cfs,destinationLocation.filenanme,destinationLocation.nodeid);
-                                                            CFS_CopyDirectoryContents(cfs,sourceLocation.nodeid,newDirId,options);
+                                                            if (newDirId != 0)
+                                                                CFS_CopyDirectoryContents(cfs,sourceLocation.nodeid,newDirId,options);
+                                                            else
+                                                                printf("Not enough space for new directory\n");
                                                         } else {
                                                             printf("%s is a directory so -R or -r option is required\n",path);
                                                         }
                                                     } else if (sourceLocation.type == TYPE_FILE) {
-                                                        CFS_CopyFile(cfs,sourceLocation.nodeid,destinationLocation.nodeid,destinationLocation.filenanme,options[CP_PROMPT]);
+                                                        if(CFS_CopyFile(cfs,sourceLocation.nodeid,destinationLocation.nodeid,destinationLocation.filenanme,options[CP_PROMPT]))
+                                                            printf("Not enough space to copy file %s\n",destinationLocation.filenanme);
                                                     }
                                                 } else {
                                                     printf("%s not a directory\n",destination);
@@ -1425,7 +1519,8 @@ int CFS_Run(CFS cfs) {
                 }
             } else {
                 printf("Not currently working with a cfs file.\n");
-                IgnoreRemainingInput();
+                if (!lastword)
+                    IgnoreRemainingInput();
             }
         }
         // Merge multiple files to one
@@ -1495,7 +1590,8 @@ int CFS_Run(CFS cfs) {
                                     if (outputFileLocation.valid) {
                                         // Check if output file exists
                                         if (!exists(cfs->fileDesc,outputFileLocation.filenanme,outputFileLocation.nodeid)) {
-                                            CFS_CreateFile(cfs,outputFileLocation.filenanme,outputFileLocation.nodeid,datablocks,totalSize);
+                                            if(!CFS_CreateFile(cfs,outputFileLocation.filenanme,outputFileLocation.nodeid,datablocks,totalSize))
+                                                printf("Not enough space to create file %s\n",outputFileLocation.filenanme);
                                         } else {
                                             printf("%s already exists.\n",outputFile);
                                         }
@@ -1581,6 +1677,158 @@ int CFS_Run(CFS cfs) {
                     DestroyString(&sourceFile);
                 } else {
                     printf("Usage:cfs_ln <SOURCE_FILE> <OUTPUT FILE>\n");
+                }
+            } else {
+                printf("Not currently working with a cfs file.\n");
+                if (!lastword)
+                    IgnoreRemainingInput();
+            }
+        }
+        // Move stuff to different destinations
+        else if (!strcmp("cfs_mv",commandLabel)) {
+            // Check if we have an open file to work on
+            if (cfs->fileDesc != -1) {
+                // Usage check: required parameters
+                if (!lastword) {
+                    // At least 1 parameter was specified
+                    // Read options
+                    int prompt = 0;
+                    // Read first option or source
+                    string option = readNextWord(&lastword);
+                    int ok = 1,lastwasoption = 0;
+                    unsigned int optionsCount = 0;
+                    while (option[0] == '-') {
+                        if (!strcmp("-i",option)) {
+                            prompt = 1;
+                        } else {
+                            printf("Wrong option %s\n",option);
+                            if (!lastword)
+                                IgnoreRemainingInput();
+                            ok = 0;
+                        }
+                        if (ok)
+                            optionsCount++;
+                        if (!ok || lastword) {
+                            lastwasoption = 1;
+                            break;
+                        } else {
+                            DestroyString(&option);
+                            option = readNextWord(&lastword);
+                        }
+                    }
+                    if (ok) {
+                        // Usage check: sources and destination must be specified
+                        if (!lastwasoption) {
+                            // Read source or sources and destination
+                            Queue sourcesQueue;
+                            Queue_Create(&sourcesQueue);
+                            string path = option;
+                            unsigned int sourceCount = 0;
+                            while (!lastword) {
+                                Queue_Push(sourcesQueue,path);
+                                sourceCount++;
+                                DestroyString(&path);
+                                path = readNextWord(&lastword);
+                            }
+                            // Usage check: at least 1 source and 1 destination required
+                            if (sourceCount > 0) {
+                                // Get destination location depending on the arguments
+                                string destination = path,destinationCopy;
+                                location destinationLocation;
+                                // Act depending on the arguments given (1st or 2nd usage)
+                                if (sourceCount > 1) {
+                                    // More than 2 arguments so destination must always be a directory (2nd usage)
+                                    // Get destination location
+                                    destinationCopy = copyString(destination);
+                                    destinationLocation = getPathLocation(cfs->fileDesc,destinationCopy,cfs->currentDirectoryId,0);
+                                    DestroyString(&destinationCopy);
+                                    // Check if destination exists
+                                    if (destinationLocation.valid) {
+                                        // Check if location is directory
+                                        if (destinationLocation.type == TYPE_DIRECTORY) {
+                                            // Copy all sources to destination
+                                            string pathCopy;
+                                            location loc;
+                                            while (sourceCount > 1) {
+                                                // Extract source from queue
+                                                path = Queue_Pop(sourcesQueue);
+                                                pathCopy = copyString(path);
+                                                loc = getPathLocation(cfs->fileDesc,pathCopy,cfs->currentDirectoryId,1);
+                                                // Check if source exists
+                                                if (loc.valid && exists(cfs->fileDesc,loc.filenanme,loc.nodeid)) {
+                                                    if (!CFS_MoveSource(cfs,loc.nodeid,loc.filenanme,destinationLocation.nodeid,loc.filenanme,prompt))
+                                                        printf("Not enough space in destination directory to move %s\n",loc.filenanme);
+                                                } else {
+                                                    printf("No such file or directory %s\n",path);
+                                                }
+                                                DestroyString(&pathCopy);
+                                                sourceCount--;
+                                            }
+                                        } else {
+                                            printf("%s not a directory\n",destination);
+                                        }
+                                    } else {
+                                        printf("%s no such file or directory\n",destination);
+                                    }
+                                } else if (sourceCount == 1) {
+                                    // 2 arguments so destination is either file or directory (1st usage)
+                                    // Get source location
+                                    string source = Queue_Pop(sourcesQueue);
+                                    string sourceBackup = copyString(source);
+                                    location sourceLocation = getPathLocation(cfs->fileDesc,sourceBackup,cfs->currentDirectoryId,1);
+                                    // Check if source exists
+                                    if (sourceLocation.valid && exists(cfs->fileDesc,sourceLocation.filenanme,sourceLocation.nodeid)) {
+                                        destinationCopy = copyString(destination);
+                                        destinationLocation = getPathLocation(cfs->fileDesc,destinationCopy,cfs->currentDirectoryId,0);
+                                        DestroyString(&destinationCopy);
+                                        // Check if destination exists
+                                        if (destinationLocation.valid) {
+                                            // Determine destination type and act appropriately
+                                            if (destinationLocation.type == TYPE_DIRECTORY) {
+                                                if (!CFS_MoveSource(cfs,sourceLocation.nodeid,sourceLocation.filenanme,destinationLocation.nodeid,sourceLocation.filenanme,prompt)) {
+                                                    printf("Not enough space in destination directory to move %s\n",sourceLocation.filenanme);
+                                                }
+                                            } else {
+                                                printf("%s already exists\n",sourceLocation.filenanme);
+                                            }
+                                        } else {
+                                            // Destination does not exist so check the argument before the last one
+                                            destinationCopy = copyString(destination);
+                                            destinationLocation = getPathLocation(cfs->fileDesc,destinationCopy,cfs->currentDirectoryId,1);
+                                            // Check if it is a valid directory
+                                            if (destinationLocation.valid) {
+                                                if (destinationLocation.type == TYPE_DIRECTORY) {
+                                                    // Determine source type and act appropriately
+                                                    if (!CFS_MoveSource(cfs,sourceLocation.nodeid,sourceLocation.filenanme,destinationLocation.nodeid,destinationLocation.filenanme,prompt)) {
+                                                        printf("Not enough space in destination directory to move %s\n",sourceLocation.filenanme);
+                                                    }
+                                                } else {
+                                                    printf("%s not a directory\n",destination);
+                                                }
+                                            } else {
+                                                printf("%s no such file or directory\n",destination);
+                                            }
+                                            DestroyString(&destinationCopy);
+                                        }
+                                    } else {
+                                        printf("%s no such file or directory\n",sourceLocation.filenanme);
+                                    }
+                                    DestroyString(&sourceBackup);
+                                    DestroyString(&source);
+                                }
+                                DestroyString(&destination);
+                            } else {
+                                printf("Usage:cfs_mv <OPTIONS> <SOURCE> <DESTINATION> | <OPTIONS> <SOURCES> ... <DIRECTORY>\n");
+                                DestroyString(&path);
+                            }
+                            Queue_Destroy(&sourcesQueue);
+                        } else {
+                            printf("Usage:cfs_mv <OPTIONS> <SOURCE> <DESTINATION> | <OPTIONS> <SOURCES> ... <DIRECTORY>\n");
+                            break;
+                        }
+                    } 
+                } else {
+                    printf("Usage:cfs_mv <OPTIONS> <SOURCE> <DESTINATION> | <OPTIONS> <SOURCES> ... <DIRECTORY>\n");
                 }
             } else {
                 printf("Not currently working with a cfs file.\n");
