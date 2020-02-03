@@ -132,7 +132,7 @@ location getPathLocation(int fileDesc,string path,unsigned int nodeid,int ignore
     }
     int found;
     location ret;
-    ret.nodeid = 0;
+    ret.nodeid = nodeid;
     ret.filenanme = "/";
     ret.type = TYPE_DIRECTORY;
     ret.valid = 1;
@@ -1464,7 +1464,7 @@ int CFS_Run(CFS cfs) {
                                                 } else {
                                                     // File so modify it with new content
                                                     MDS sourceData = getMetadataFromNodeId(cfs->fileDesc,sourceLocation.nodeid);
-                                                    CFS_ModifyFile(cfs->fileDesc,sourceLocation.nodeid,sourceData.data.datablocks,sourceData.size);
+                                                    CFS_ModifyFile(cfs->fileDesc,destinationLocation.nodeid,sourceData.data.datablocks,sourceData.size);
                                                 }
                                             }
                                         } else {
@@ -1486,8 +1486,12 @@ int CFS_Run(CFS cfs) {
                                                             printf("%s is a directory so -R or -r option is required\n",path);
                                                         }
                                                     } else if (sourceLocation.type == TYPE_FILE) {
+                                                        if (!exists(cfs->fileDesc,destinationLocation.filenanme,destinationLocation.nodeid)) {
                                                         if(CFS_CopyFile(cfs,sourceLocation.nodeid,destinationLocation.nodeid,destinationLocation.filenanme,options[CP_PROMPT]))
                                                             printf("Not enough space to copy file %s\n",destinationLocation.filenanme);
+                                                        } else {
+                                                            printf("%s already exists in destination\n",destinationLocation.filenanme);
+                                                        }
                                                     }
                                                 } else {
                                                     printf("%s not a directory\n",destination);
@@ -1811,7 +1815,7 @@ int CFS_Run(CFS cfs) {
                                             DestroyString(&destinationCopy);
                                         }
                                     } else {
-                                        printf("%s no such file or directory\n",sourceLocation.filenanme);
+                                        printf("---%d %d %s no such file or directory\n",sourceLocation.valid,sourceLocation.nodeid,sourceLocation.filenanme);
                                     }
                                     DestroyString(&sourceBackup);
                                     DestroyString(&source);
