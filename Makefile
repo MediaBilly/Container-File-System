@@ -23,4 +23,4 @@ src/queue.o:src/queue.c
 .PHONY : clean
 
 clean:
-	rm -f $(TARGETS)
+	rm -f $(TARGETS) cfs

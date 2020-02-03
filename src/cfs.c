@@ -660,8 +660,8 @@ void CFS_CopyDirectoryContents(CFS cfs,unsigned int sourceDirNodeId,unsigned int
             // Determine ith entity type
             if (tmpData.type == TYPE_DIRECTORY) {
                 // Directory
-                // Ignore . and .. directories to avoid infinite loop
-                if (strcmp(".",filename) && strcmp("..",filename)) {
+                // Ignore . and .. directories and sane destimation directory to avoid infinite loop
+                if (strcmp(".",filename) && strcmp("..",filename) && tmpData.nodeid != destDirNodeId) {
                     // Recursively copy only with -r option
                     if (options[CP_RECURSIVELY_COPY_DIRECTORIES]) {
                         unsigned int newDirId = CFS_CreateDirectory(cfs,filename,destDirNodeId);
@@ -1486,12 +1486,8 @@ int CFS_Run(CFS cfs) {
                                                             printf("%s is a directory so -R or -r option is required\n",path);
                                                         }
                                                     } else if (sourceLocation.type == TYPE_FILE) {
-                                                        if (!exists(cfs->fileDesc,destinationLocation.filenanme,destinationLocation.nodeid)) {
                                                         if(CFS_CopyFile(cfs,sourceLocation.nodeid,destinationLocation.nodeid,destinationLocation.filenanme,options[CP_PROMPT]))
                                                             printf("Not enough space to copy file %s\n",destinationLocation.filenanme);
-                                                        } else {
-                                                            printf("%s already exists in destination\n",destinationLocation.filenanme);
-                                                        }
                                                     }
                                                 } else {
                                                     printf("%s not a directory\n",destination);
@@ -1760,8 +1756,12 @@ int CFS_Run(CFS cfs) {
                                                 loc = getPathLocation(cfs->fileDesc,pathCopy,cfs->currentDirectoryId,1);
                                                 // Check if source exists
                                                 if (loc.valid && exists(cfs->fileDesc,loc.filenanme,loc.nodeid)) {
-                                                    if (!CFS_MoveSource(cfs,loc.nodeid,loc.filenanme,destinationLocation.nodeid,loc.filenanme,prompt))
-                                                        printf("Not enough space in destination directory to move %s\n",loc.filenanme);
+                                                    if (!exists(cfs->fileDesc,loc.filenanme,destinationLocation.nodeid)) {
+                                                        if (!CFS_MoveSource(cfs,loc.nodeid,loc.filenanme,destinationLocation.nodeid,loc.filenanme,prompt))
+                                                            printf("Not enough space in destination directory to move %s\n",loc.filenanme);
+                                                    } else {
+                                                        printf("%s already exists in destination\n",loc.filenanme);
+                                                    }
                                                 } else {
                                                     printf("No such file or directory %s\n",path);
                                                 }
@@ -1789,8 +1789,12 @@ int CFS_Run(CFS cfs) {
                                         if (destinationLocation.valid) {
                                             // Determine destination type and act appropriately
                                             if (destinationLocation.type == TYPE_DIRECTORY) {
-                                                if (!CFS_MoveSource(cfs,sourceLocation.nodeid,sourceLocation.filenanme,destinationLocation.nodeid,sourceLocation.filenanme,prompt)) {
-                                                    printf("Not enough space in destination directory to move %s\n",sourceLocation.filenanme);
+                                                if (!exists(cfs->fileDesc,sourceLocation.filenanme,destinationLocation.nodeid)) {
+                                                    if (!CFS_MoveSource(cfs,sourceLocation.nodeid,sourceLocation.filenanme,destinationLocation.nodeid,sourceLocation.filenanme,prompt)) {
+                                                        printf("Not enough space in destination directory to move %s\n",sourceLocation.filenanme);
+                                                    }
+                                                } else {
+                                                        printf("%s already exists in destination\n",sourceLocation.filenanme);
                                                 }
                                             } else {
                                                 printf("%s already exists\n",sourceLocation.filenanme);
@@ -1803,8 +1807,12 @@ int CFS_Run(CFS cfs) {
                                             if (destinationLocation.valid) {
                                                 if (destinationLocation.type == TYPE_DIRECTORY) {
                                                     // Determine source type and act appropriately
-                                                    if (!CFS_MoveSource(cfs,sourceLocation.nodeid,sourceLocation.filenanme,destinationLocation.nodeid,destinationLocation.filenanme,prompt)) {
-                                                        printf("Not enough space in destination directory to move %s\n",sourceLocation.filenanme);
+                                                    if (!exists(cfs->fileDesc,destinationLocation.filenanme,destinationLocation.nodeid)) {
+                                                        if (!CFS_MoveSource(cfs,sourceLocation.nodeid,sourceLocation.filenanme,destinationLocation.nodeid,destinationLocation.filenanme,prompt)) {
+                                                            printf("Not enough space in destination directory to move %s\n",sourceLocation.filenanme);
+                                                        }
+                                                    } else {
+                                                        printf("%s already exists in destination\n",sourceLocation.filenanme);
                                                     }
                                                 } else {
                                                     printf("%s not a directory\n",destination);
@@ -1815,7 +1823,7 @@ int CFS_Run(CFS cfs) {
                                             DestroyString(&destinationCopy);
                                         }
                                     } else {
-                                        printf("---%d %d %s no such file or directory\n",sourceLocation.valid,sourceLocation.nodeid,sourceLocation.filenanme);
+                                        printf("%s no such file or directory\n",sourceLocation.filenanme);
                                     }
                                     DestroyString(&sourceBackup);
                                     DestroyString(&source);
